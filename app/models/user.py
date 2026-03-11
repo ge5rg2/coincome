@@ -39,7 +39,7 @@ class User(Base):
             return 999
         if self.subscription_tier == SubscriptionTier.PRO and self.is_pro:
             return 999
-        return 1  # FREE
+        return 2  # FREE 2개로 제한
 
     @property
     def max_invest_krw(self) -> int:
