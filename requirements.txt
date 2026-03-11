@@ -1,0 +1,23 @@
+# Web Framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+httpx==0.28.1
+
+# Discord
+discord.py==2.4.0
+
+# Database
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+alembic==1.14.0
+
+# Exchange
+ccxt==4.4.42
+
+# Config
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Utils
+python-jose[cryptography]==3.3.0
+aiohttp==3.11.11
