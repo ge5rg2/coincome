@@ -135,7 +135,7 @@ class TradingSettingModal(discord.ui.Modal, title="매매 설정"):
                 exchange=exchange,
                 notify_callback=self.bot._send_dm,
             )
-            WorkerRegistry.get().register(worker)
+            await WorkerRegistry.get().register(worker)
             worker.start()
 
         summary = (
@@ -166,7 +166,7 @@ class SettingsCog(commands.Cog):
     @app_commands.command(name="중지", description="실행 중인 자동 매매를 중지합니다.")
     async def stop_command(self, interaction: discord.Interaction) -> None:
         user_id = str(interaction.user.id)
-        WorkerRegistry.get().stop_all_for_user(user_id)
+        await WorkerRegistry.get().stop_all_for_user(user_id)
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
