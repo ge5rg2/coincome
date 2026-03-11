@@ -1,6 +1,13 @@
 """
-ExchangeService: ccxt를 통한 업비트 API 추상화 레이어.
-사용자별 API 키를 런타임에 주입할 수 있도록 인스턴스 단위로 설계.
+ExchangeService: ccxt를 통한 업비트 REST API 추상화 레이어.
+
+역할 범위 (WebSocket 리팩토링 이후):
+  - 시세 조회: UpbitWebsocketManager가 담당 → 이 클래스에서 제거
+  - 잔고 조회: fetch_balance, fetch_krw_balance, fetch_coin_balance
+  - 주문 실행: create_market_buy_order, create_market_sell_order
+  - 주문 조회: fetch_order, fetch_open_orders
+
+사용자별 API 키를 런타임에 주입하므로 인스턴스 단위로 설계.
 """
 from __future__ import annotations
 
@@ -21,28 +28,6 @@ class ExchangeService:
                 "secret": secret_key,
                 "enableRateLimit": True,
             }
-        )
-
-    # ------------------------------------------------------------------
-    # 시세 조회
-    # ------------------------------------------------------------------
-
-    async def fetch_ticker(self, symbol: str) -> dict:
-        """현재가 및 거래 정보 반환. symbol 예: 'BTC/KRW'"""
-        loop = asyncio.get_event_loop()
-        ticker = await loop.run_in_executor(None, partial(self._exchange.fetch_ticker, symbol))
-        return ticker
-
-    async def fetch_current_price(self, symbol: str) -> float:
-        """현재가(last)만 반환"""
-        ticker = await self.fetch_ticker(symbol)
-        return float(ticker["last"])
-
-    async def fetch_ohlcv(self, symbol: str, timeframe: str = "1m", limit: int = 100) -> list:
-        """OHLCV 캔들 데이터 반환"""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, partial(self._exchange.fetch_ohlcv, symbol, timeframe, limit=limit)
         )
 
     # ------------------------------------------------------------------
@@ -72,8 +57,9 @@ class ExchangeService:
     async def create_market_buy_order(self, symbol: str, amount_krw: float) -> dict:
         """
         시장가 매수.
-        업비트는 매수 시 KRW 금액을 quoteOrderQty로 전달.
-        ccxt upbit는 create_order(symbol, 'market', 'buy', amount, price=None, params={'cost': krw})
+
+        업비트는 매수 시 KRW 금액을 amount에 전달.
+        ccxt upbit: create_order(symbol, 'market', 'buy', krw_amount, ...)
         """
         loop = asyncio.get_event_loop()
         order = await loop.run_in_executor(
@@ -83,12 +69,12 @@ class ExchangeService:
                 symbol,
                 "market",
                 "buy",
-                amount_krw,         # upbit: 매수 시 KRW 금액
+                amount_krw,
                 None,
                 {"createMarketBuyOrderRequiresPrice": False},
             ),
         )
-        logger.info("매수 주문 완료: %s %.0f KRW → %s", symbol, amount_krw, order.get("id"))
+        logger.info("매수 주문 완료: %s %.0f KRW → order_id=%s", symbol, amount_krw, order.get("id"))
         return order
 
     async def create_market_sell_order(self, symbol: str, amount_coin: float) -> dict:
@@ -98,7 +84,7 @@ class ExchangeService:
             None,
             partial(self._exchange.create_market_sell_order, symbol, amount_coin),
         )
-        logger.info("매도 주문 완료: %s %.8f → %s", symbol, amount_coin, order.get("id"))
+        logger.info("매도 주문 완료: %s %.8f → order_id=%s", symbol, amount_coin, order.get("id"))
         return order
 
     # ------------------------------------------------------------------
@@ -106,12 +92,14 @@ class ExchangeService:
     # ------------------------------------------------------------------
 
     async def fetch_order(self, order_id: str, symbol: str) -> dict:
+        """주문 ID로 단일 주문 조회"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None, partial(self._exchange.fetch_order, order_id, symbol)
         )
 
     async def fetch_open_orders(self, symbol: str) -> list:
+        """미체결 주문 목록 조회"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None, partial(self._exchange.fetch_open_orders, symbol)
