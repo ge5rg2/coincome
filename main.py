@@ -1,18 +1,20 @@
 """
 CoinCome 전체 진입점.
-Discord 봇과 FastAPI 서버를 단일 프로세스에서 동시에 실행.
-
-실행 방법:
-    python main.py
+Discord 봇과 FastAPI 서버를 단일 이벤트 루프에서 동시에 실행.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import threading
+import os
+import certifi
+import ssl
+
+# [Mac 환경 SSL 인증서 에러 강제 우회 설정]
+os.environ["SSL_CERT_FILE"] = certifi.where()
+ssl._create_default_https_context = ssl._create_unverified_context
 
 import uvicorn
-
 from app.api.main import app as fastapi_app
 from app.bot.main import bot
 from app.config import settings
@@ -24,25 +26,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run_fastapi() -> None:
-    """FastAPI 서버를 별도 스레드에서 실행"""
-    uvicorn.run(
-        fastapi_app,
+async def run_fastapi() -> None:
+    """FastAPI 서버를 비동기 루프 내에서 실행"""
+    config = uvicorn.Config(
+        app=fastapi_app,
         host=settings.app_host,
         port=settings.app_port,
         log_level="info",
     )
+    server = uvicorn.Server(config)
+    await server.serve()
 
 
 async def main() -> None:
-    # FastAPI를 백그라운드 스레드에서 기동
-    api_thread = threading.Thread(target=run_fastapi, daemon=True)
-    api_thread.start()
-    logger.info("FastAPI 서버 시작: http://%s:%s", settings.app_host, settings.app_port)
-
-    # Discord 봇 실행
-    await bot.start(settings.discord_bot_token)
-
+    # asyncio.gather를 사용해 두 서버를 하나의 루프 안에서 동시에 실행합니다.
+    # 이렇게 하면 DB 연결 풀과 웹소켓 이벤트가 충돌하지 않습니다.
+    logger.info("FastAPI 및 Discord 봇 동시 시작 준비...")
+    
+    await asyncio.gather(
+        run_fastapi(),
+        bot.start(settings.discord_bot_token)
+    )
 
 if __name__ == "__main__":
+    # Windows/Mac 환경 비동기 루프 에러 방지
+    if os.name == "nt":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
     asyncio.run(main())
