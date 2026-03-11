@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routers import payments
+from app.api.routers import payments, web
 from app.database import engine
 from app.models import BotSetting, Payment, User  # noqa: F401 — Alembic 인식용
 from app.services.websocket import UpbitWebsocketManager
@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="CoinCome API", version="0.1.0", lifespan=lifespan)
     app.include_router(payments.router)
+    app.include_router(web.router)
     return app
 
 
