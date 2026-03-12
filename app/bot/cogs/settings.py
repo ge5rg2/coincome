@@ -300,22 +300,28 @@ class SettingsCog(commands.Cog):
 
         for s in settings_list:
             current_price = ws_manager.get_price(s.symbol)
-            
+
+            # 익절 / 손절 설정 표시 (미설정이면 "미설정" 표기)
+            tp_str = f"+{s.target_profit_pct:.1f}%" if s.target_profit_pct is not None else "미설정"
+            sl_str = f"-{s.stop_loss_pct:.1f}%" if s.stop_loss_pct is not None else "미설정"
+            config_line = f"**익절:** {tp_str}  |  **손절:** {sl_str}  |  **매수금액:** {float(s.buy_amount_krw):,.0f} KRW"
+
             # 매수 체결이 완료되어 DB에 단가와 수량이 있는 경우
             if s.buy_price and s.amount_coin and current_price:
                 profit_pct = (current_price - s.buy_price) / s.buy_price * 100
                 pnl = (current_price - s.buy_price) * s.amount_coin
                 status_icon = "🟢" if profit_pct >= 0 else "🔴"
-                
+
                 value = (
                     f"**매수가:** {s.buy_price:,.0f} KRW\n"
                     f"**현재가:** {current_price:,.0f} KRW\n"
                     f"**수익률:** {status_icon} **{profit_pct:+.2f}%** ({pnl:+,.0f} KRW)\n"
-                    f"**수량:** {s.amount_coin:.6f}"
+                    f"**수량:** {s.amount_coin:.6f}\n"
+                    f"{config_line}"
                 )
             else:
                 # 설정은 켰으나 아직 시세 수신 전이거나 체결 대기 중인 경우
-                value = "⏳ 매수 대기 중 또는 시세 로딩 중..."
+                value = f"⏳ 매수 대기 중 또는 시세 로딩 중...\n{config_line}"
 
             embed.add_field(name=f"🪙 {s.symbol}", value=value, inline=False)
 
