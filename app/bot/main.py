@@ -1,6 +1,7 @@
 """Discord 봇 엔트리 포인트"""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -46,12 +47,37 @@ class CoinComeBot(commands.Bot):
         ))
 
     async def _send_dm(self, user_id: str, message: str) -> None:
-        """사용자에게 DM 전송"""
-        try:
-            user = await self.fetch_user(int(user_id))
-            await user.send(message)
-        except Exception as exc:
-            logger.warning("DM 전송 실패: user_id=%s err=%s", user_id, exc)
+        """사용자에게 DM 전송. HTTPException 발생 시 최대 3회 재시도 (간격 3 초).
+
+        Args:
+            user_id: Discord 사용자 ID (문자열)
+            message: 전송할 메시지 내용
+        """
+        for attempt in range(1, 4):
+            try:
+                user = await self.fetch_user(int(user_id))
+                await user.send(message)
+                return  # 전송 성공 시 즉시 반환
+            except discord.Forbidden:
+                # 403: 사용자가 DM을 차단한 경우 — 재시도해도 의미 없음
+                logger.warning("DM 전송 거부됨 (DM 차단): user_id=%s", user_id)
+                return
+            except discord.HTTPException as exc:
+                if attempt < 3:
+                    logger.warning(
+                        "DM 전송 실패 (시도 %d/3, HTTP %s): user_id=%s — 3초 후 재시도",
+                        attempt, exc.status, user_id,
+                    )
+                    await asyncio.sleep(3)
+                else:
+                    logger.error(
+                        "DM 전송 최종 실패 (3회 모두 실패, HTTP %s): user_id=%s",
+                        exc.status, user_id,
+                    )
+            except Exception as exc:
+                # fetch_user 실패 등 비-HTTP 오류는 재시도 없이 즉시 종료
+                logger.error("DM 전송 오류 (재시도 불가): user_id=%s err=%s", user_id, exc)
+                return
 
 
 bot = CoinComeBot()
