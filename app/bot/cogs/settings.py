@@ -21,6 +21,12 @@ from app.services.trading_worker import TradingWorker, WorkerRegistry
 
 logger = logging.getLogger(__name__)
 
+# API 키 미등록 신규 유저 안내 메시지 (공통)
+_ONBOARDING_MSG = (
+    "⚠️ 코인 자동 매매를 사용하려면 먼저 업비트 API 키 등록이 필요합니다.\n"
+    "채팅창에 `/키등록` 명령어를 입력해 주세요!"
+)
+
 # 지원 코인 목록
 SUPPORTED_COINS = [
     app_commands.Choice(name="비트코인 (BTC/KRW)", value="BTC/KRW"),
@@ -228,6 +234,15 @@ class SettingsCog(commands.Cog):
     async def settings_command(
         self, interaction: discord.Interaction, coin: app_commands.Choice[str]
     ) -> None:
+        # API 키 가드: 미등록 유저에게 /키등록 안내 후 모달 차단
+        user_id = str(interaction.user.id)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+        if user is None or not user.upbit_access_key or not user.upbit_secret_key:
+            await interaction.response.send_message(_ONBOARDING_MSG, ephemeral=True)
+            return
+
         modal = TradingSettingModal(symbol=coin.value, bot=self.bot)
         await interaction.response.send_modal(modal)
     
@@ -235,15 +250,22 @@ class SettingsCog(commands.Cog):
     async def stop_command(self, interaction: discord.Interaction) -> None:
         user_id = str(interaction.user.id)
 
-        # 현재 실행 중인 설정(코인) 목록 가져오기
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
+            # API 키 가드
+            user_result = await db.execute(select(User).where(User.user_id == user_id))
+            user = user_result.scalar_one_or_none()
+            if user is None or not user.upbit_access_key or not user.upbit_secret_key:
+                await interaction.response.send_message(_ONBOARDING_MSG, ephemeral=True)
+                return
+
+            # 현재 실행 중인 설정(코인) 목록 가져오기
+            settings_result = await db.execute(
                 select(BotSetting).where(
                     BotSetting.user_id == user_id,
                     BotSetting.is_running.is_(True),
                 )
             )
-            settings_list = result.scalars().all()
+            settings_list = settings_result.scalars().all()
 
         if not settings_list:
             await interaction.response.send_message("👀 현재 실행 중인 자동 매매가 없습니다.", ephemeral=True)
@@ -279,15 +301,22 @@ class SettingsCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
         user_id = str(interaction.user.id)
 
-        # 1. DB에서 현재 실행 중인 내 봇 설정들을 가져옴
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
+            # API 키 가드 (defer 이후이므로 followup.send 사용)
+            user_result = await db.execute(select(User).where(User.user_id == user_id))
+            user = user_result.scalar_one_or_none()
+            if user is None or not user.upbit_access_key or not user.upbit_secret_key:
+                await interaction.followup.send(_ONBOARDING_MSG, ephemeral=True)
+                return
+
+            # 현재 실행 중인 봇 설정 조회
+            settings_result = await db.execute(
                 select(BotSetting).where(
                     BotSetting.user_id == user_id,
-                    BotSetting.is_running.is_(True)
+                    BotSetting.is_running.is_(True),
                 )
             )
-            settings_list = result.scalars().all()
+            settings_list = settings_result.scalars().all()
 
         if not settings_list:
             await interaction.followup.send("👀 현재 감시 중이거나 보유 중인 코인이 없습니다.", ephemeral=True)
