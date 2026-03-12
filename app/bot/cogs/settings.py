@@ -70,6 +70,19 @@ class TradingSettingModal(discord.ui.Modal, title="매매 설정"):
             await interaction.followup.send("❌ 숫자 형식이 올바르지 않습니다.", ephemeral=True)
             return
 
+        # ---------------------------------------------------------
+        # [방어 로직] 최소 6,000원 이상 입력 강제
+        # ---------------------------------------------------------
+        if buy_amount_krw < 6000:
+            await interaction.followup.send(
+                "❌ **매수 금액이 너무 적습니다.**\n"
+                "업비트 최소 주문 한도(5,000원) 및 손절 시 가격 하락을 고려하여\n"
+                "매수 금액은 **최소 6,000 KRW 이상**으로 설정해 주세요.",
+                ephemeral=True
+            )
+            return
+        # ---------------------------------------------------------
+
         async with AsyncSessionLocal() as db:
             # 사용자 조회 또는 생성
             result = await db.execute(select(User).where(User.user_id == user_id))
