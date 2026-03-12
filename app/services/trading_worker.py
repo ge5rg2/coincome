@@ -267,7 +267,9 @@ class TradingWorker:
             return
 
         order = await self.exchange.create_market_sell_order(self.symbol, pos.amount_coin)
-        sell_price = float(order.get("average", current_price))
+        # order["average"] 키가 존재하더라도 Upbit ccxt는 즉시 응답에서 None을 반환하는 경우가 있음
+        # → dict.get() default는 키 부재 시에만 동작하므로, or 연산으로 None 폴백 처리
+        sell_price = float(order.get("average") or current_price)
         realized_pnl = (sell_price - pos.buy_price) * pos.amount_coin
 
         # ── DB 초기화 (is_running=False, buy_price/amount_coin=NULL) ──
