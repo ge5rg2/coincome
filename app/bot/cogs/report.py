@@ -1,31 +1,47 @@
 """
-정기 보고 Cog: 자동 매매 실행 중인 사용자에게 1시간마다 수익률 현황을 DM으로 전송.
+정기 보고 Cog: 자동 매매 실행 중인 사용자에게 주기적으로 수익률 현황을 DM으로 전송.
 
-설계 참고:
-  현재는 1시간 고정 주기로 전체 사용자에게 일괄 전송합니다.
-  추후 User 모델에 아래 컬럼을 추가하면 개인화된 보고 기능을 지원할 수 있습니다.
-    - report_enabled: bool        — 정기 보고 수신 여부 (기본값 True)
-    - report_interval_hours: int  — 보고 주기 (기본값 1, 허용값: 1/3/6/12/24)
+사용자별 설정:
+  - report_enabled        : 보고 수신 on/off (기본 켜짐)
+  - report_interval_hours : 보고 주기 — 1 / 3 / 6 / 12 / 24 시간 (기본 1)
+  - last_report_sent_at   : 마지막 전송 시각 (DB 영속, 재시작 후에도 주기 유지)
+
+루프 주기는 1시간 고정이며, 각 사용자의 last_report_sent_at 와 interval 을
+비교해 실제 전송 여부를 결정합니다.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
+from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
 from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
+from app.models.user import User
 from app.services.websocket import UpbitWebsocketManager
 
 logger = logging.getLogger(__name__)
 
+# 허용 보고 주기 선택지 (Discord Choice)
+_INTERVAL_CHOICES = [
+    app_commands.Choice(name="1시간마다", value=1),
+    app_commands.Choice(name="3시간마다", value=3),
+    app_commands.Choice(name="6시간마다", value=6),
+    app_commands.Choice(name="12시간마다", value=12),
+    app_commands.Choice(name="24시간마다", value=24),
+]
+
 
 class ReportCog(commands.Cog):
-    """매 시간 자동 매매 실행 중인 사용자에게 수익률 요약 DM을 전송하는 Cog.
+    """매 시간 사용자별 설정을 확인해 수익률 요약 DM을 전송하는 Cog.
 
     Attributes:
         bot: Discord 봇 인스턴스.
@@ -40,7 +56,7 @@ class ReportCog(commands.Cog):
         self.hourly_report.cancel()
 
     # ------------------------------------------------------------------
-    # 백그라운드 루프
+    # 백그라운드 루프 (1시간 주기로 실행, 개별 전송 여부는 내부에서 판단)
     # ------------------------------------------------------------------
 
     @tasks.loop(hours=1)
@@ -48,17 +64,23 @@ class ReportCog(commands.Cog):
         """실행 중인 BotSetting을 사용자별로 묶어 수익률 요약 DM을 전송한다.
 
         처리 흐름:
-          1. DB에서 is_running=True 인 BotSetting 전체 조회
-          2. user_id 기준으로 그룹핑
-          3. 사용자별 Embed 빌드 후 DM 전송
-          4. 사용자 간 1초 지연으로 Discord Rate-Limit 방지
+          1. DB: is_running=True BotSetting + 연관 User 일괄 조회
+          2. user_id 기준 그룹핑
+          3. 각 사용자별:
+               a. report_enabled=False → 스킵
+               b. last_report_sent_at 기준 주기 미도달 → 스킵
+               c. Embed 빌드 → DM 전송 → last_report_sent_at 갱신
+          4. 사용자 간 asyncio.sleep(1) 으로 Discord Rate-Limit 방지
         """
         logger.info("정기 보고 루프 실행")
+        now = datetime.now(timezone.utc)
 
-        # 1. 실행 중인 모든 BotSetting 조회
+        # 1. 실행 중인 BotSetting + User 일괄 조회
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(BotSetting).where(BotSetting.is_running.is_(True))
+                select(BotSetting)
+                .where(BotSetting.is_running.is_(True))
+                .options(selectinload(BotSetting.user))
             )
             all_settings: list[BotSetting] = result.scalars().all()
 
@@ -72,22 +94,67 @@ class ReportCog(commands.Cog):
             user_settings[s.user_id].append(s)
 
         ws_manager = UpbitWebsocketManager.get()
-        sent = 0
+        sent = skipped_disabled = skipped_interval = 0
 
         for user_id, settings in user_settings.items():
+            # User 레코드 — selectinload 로 이미 로드됨
+            user: User | None = settings[0].user
+            if user is None:
+                logger.warning("User 레코드 없음, 보고 스킵: user_id=%s", user_id)
+                continue
+
+            # a. 보고 비활성화 여부 확인
+            if not user.report_enabled:
+                logger.debug("정기 보고 스킵 (비활성화): user_id=%s", user_id)
+                skipped_disabled += 1
+                continue
+
+            # b. 전송 주기 도달 여부 확인
+            if user.last_report_sent_at is not None:
+                last = user.last_report_sent_at
+                # DB에 naive datetime이 저장된 경우 UTC로 보정
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                elapsed_hours = (now - last).total_seconds() / 3600
+                if elapsed_hours < user.report_interval_hours:
+                    logger.debug(
+                        "정기 보고 스킵 (주기 미도달 %.1fh / %dh): user_id=%s",
+                        elapsed_hours,
+                        user.report_interval_hours,
+                        user_id,
+                    )
+                    skipped_interval += 1
+                    continue
+
+            # c. DM 전송 및 last_report_sent_at 갱신
             try:
                 embed = self._build_report_embed(settings, ws_manager)
                 await self._send_dm_embed(user_id, embed)
+
+                # last_report_sent_at 업데이트 (별도 세션)
+                async with AsyncSessionLocal() as db:
+                    await db.execute(
+                        update(User)
+                        .where(User.user_id == user_id)
+                        .values(last_report_sent_at=now)
+                    )
+                    await db.commit()
+
                 sent += 1
             except Exception as exc:
                 logger.error(
                     "정기 보고 처리 오류: user_id=%s err=%s", user_id, exc
                 )
 
-            # 사용자 간 1초 간격으로 Rate-Limit 방지
+            # Rate-Limit 방지: 사용자 간 1초 간격
             await asyncio.sleep(1)
 
-        logger.info("정기 보고 루프 완료 — 전송 %d 명 / 전체 %d 명", sent, len(user_settings))
+        logger.info(
+            "정기 보고 루프 완료 — 전송 %d명 | 주기 미도달 %d명 | 비활성 %d명",
+            sent,
+            skipped_interval,
+            skipped_disabled,
+        )
 
     @hourly_report.before_loop
     async def before_hourly_report(self) -> None:
@@ -146,7 +213,7 @@ class ReportCog(commands.Cog):
 
             embed.add_field(name=f"🪙 {s.symbol}", value=value, inline=False)
 
-        # 포지션 보유 코인이 하나 이상인 경우에만 총 평가손익 표시
+        # 포지션 보유 코인이 하나 이상일 때만 총 평가손익 표시
         if has_position:
             pnl_icon = "🟢" if total_pnl >= 0 else "🔴"
             embed.add_field(
@@ -200,3 +267,72 @@ class ReportCog(commands.Cog):
                     "정기 보고 DM 오류 (재시도 불가): user_id=%s err=%s", user_id, exc
                 )
                 return
+
+    # ------------------------------------------------------------------
+    # /보고설정 슬래시 커맨드
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="보고설정",
+        description="정기 수익률 보고 DM 수신 여부와 주기를 설정합니다.",
+    )
+    @app_commands.describe(
+        enabled="정기 보고 수신 여부 (True: 켜기 / False: 끄기)",
+        interval="보고 주기를 선택하세요 (미선택 시 현재 설정 유지)",
+    )
+    @app_commands.choices(interval=_INTERVAL_CHOICES)
+    async def report_settings_command(
+        self,
+        interaction: discord.Interaction,
+        enabled: Optional[bool] = None,
+        interval: Optional[app_commands.Choice[int]] = None,
+    ) -> None:
+        """보고 수신 여부 및 주기를 DB에 저장한다.
+
+        enabled 와 interval 중 하나만 전달해도 해당 항목만 업데이트한다.
+        둘 다 생략하면 현재 설정을 조회해 응답한다.
+        """
+        user_id = str(interaction.user.id)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+
+            if user is None:
+                await interaction.response.send_message(
+                    "⚠️ 등록된 계정이 없습니다. `/키등록` 명령어로 먼저 등록해 주세요.",
+                    ephemeral=True,
+                )
+                return
+
+            # 변경 없음 — 현재 설정 조회만
+            if enabled is None and interval is None:
+                interval_str = f"{user.report_interval_hours}시간마다"
+                status_str = "켜짐 ✅" if user.report_enabled else "꺼짐 ⛔"
+                await interaction.response.send_message(
+                    f"📋 **현재 보고 설정**\n"
+                    f"수신 여부: **{status_str}**\n"
+                    f"보고 주기: **{interval_str}**",
+                    ephemeral=True,
+                )
+                return
+
+            # 변경 사항 적용
+            if enabled is not None:
+                user.report_enabled = enabled
+            if interval is not None:
+                user.report_interval_hours = interval.value
+                # 주기 변경 시 last_report_sent_at 초기화 → 변경 직후 즉시 1회 전송
+                user.last_report_sent_at = None
+
+            await db.commit()
+
+        # 결과 메시지 빌드
+        parts: list[str] = ["✅ **보고 설정이 변경되었습니다.**"]
+        if enabled is not None:
+            parts.append(f"수신 여부: **{'켜짐 ✅' if enabled else '꺼짐 ⛔'}**")
+        if interval is not None:
+            parts.append(f"보고 주기: **{interval.name}**")
+            parts.append("_(주기 변경으로 다음 루프에서 즉시 보고가 전송됩니다)_")
+
+        await interaction.response.send_message("\n".join(parts), ephemeral=True)
