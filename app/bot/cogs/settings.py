@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 import discord
+import httpx
 from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
@@ -73,16 +74,76 @@ def _make_key_registered_embed() -> discord.Embed:
     )
     return embed
 
-# 지원 코인 목록
-SUPPORTED_COINS = [
-    app_commands.Choice(name="비트코인 (BTC/KRW)", value="BTC/KRW"),
-    app_commands.Choice(name="이더리움 (ETH/KRW)", value="ETH/KRW"),
-    app_commands.Choice(name="리플 (XRP/KRW)", value="XRP/KRW"),
-    app_commands.Choice(name="도지코인 (DOGE/KRW)", value="DOGE/KRW"),
-    app_commands.Choice(name="솔라나 (SOL/KRW)", value="SOL/KRW"),
-    app_commands.Choice(name="인터넷컴퓨터 (ICP/KRW)", value="ICP/KRW"),
-    app_commands.Choice(name="테더 (USDT/KRW)", value="USDT/KRW"),
-]
+
+# ────────────────────────────────────────────────────────────────────
+# 업비트 KRW 마켓 인메모리 캐시
+#
+# SettingsCog.cog_load() 에서 1회 채워지며, 이후 coin_autocomplete()
+# 콜백이 매 키보드 입력마다 참조한다. REST API 를 입력 이벤트마다 호출하지
+# 않으므로 Rate Limit 위험이 없다.
+#
+# 구조: [{"symbol": "BTC/KRW", "korean_name": "비트코인", "english_name": "Bitcoin"}, ...]
+# ────────────────────────────────────────────────────────────────────
+_KRW_MARKETS: list[dict] = []
+
+
+async def _fetch_krw_markets() -> list[dict]:
+    """업비트 REST API 에서 KRW 원화 마켓 목록을 가져와 정규화한다.
+
+    Returns:
+        symbol(BTC/KRW 형식)·korean_name·english_name 을 담은 dict 리스트.
+
+    Raises:
+        httpx.HTTPStatusError: API 응답이 4xx/5xx 일 때.
+    """
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get("https://api.upbit.com/v1/market/all")
+        resp.raise_for_status()
+
+    return [
+        {
+            # KRW-BTC → BTC/KRW (CCXT 표준 심볼 형식)
+            "symbol": f"{m['market'].split('-')[1]}/KRW",
+            "korean_name": m["korean_name"],
+            "english_name": m["english_name"],
+        }
+        for m in resp.json()
+        if m["market"].startswith("KRW-")
+    ]
+
+
+async def coin_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> list[app_commands.Choice[str]]:
+    """유저가 코인 검색창에 타이핑하면 실시간으로 매칭 항목을 반환한다.
+
+    한글명·영문명·심볼(BTC/KRW 형식) 세 필드에서 부분 일치 검색한다.
+    디스코드 API 제한에 따라 최대 25개까지만 반환한다.
+
+    Args:
+        interaction: 현재 Discord 인터랙션.
+        current: 유저가 현재까지 입력한 문자열.
+
+    Returns:
+        매칭된 app_commands.Choice 리스트 (최대 25개).
+    """
+    if not _KRW_MARKETS:
+        # 캐시가 아직 비어 있는 경우 (봇 기동 직후 등) — 빈 리스트 반환
+        return []
+
+    query = current.strip().lower()
+    matches = [
+        app_commands.Choice(
+            name=f"{m['korean_name']} ({m['symbol']})",
+            value=m["symbol"],
+        )
+        for m in _KRW_MARKETS
+        if query in m["korean_name"].lower()
+        or query in m["english_name"].lower()
+        or query in m["symbol"].lower()
+    ]
+    return matches[:25]
 
 
 class TradingSettingModal(discord.ui.Modal, title="매매 설정"):
@@ -274,11 +335,24 @@ class SettingsCog(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
+    async def cog_load(self) -> None:
+        """Cog 로드 시 업비트 KRW 마켓 목록을 인메모리에 캐싱한다.
+
+        setup_hook() 의 await bot.add_cog() 완료 시점에 자동 호출된다.
+        실패해도 봇은 정상 기동하며, autocomplete 는 빈 리스트를 반환한다.
+        """
+        global _KRW_MARKETS
+        try:
+            _KRW_MARKETS = await _fetch_krw_markets()
+            logger.info("업비트 KRW 마켓 캐시 완료: %d 개 코인", len(_KRW_MARKETS))
+        except Exception as exc:
+            logger.error("업비트 KRW 마켓 캐시 실패 (autocomplete 비활성): %s", exc)
+
     @app_commands.command(name="설정", description="코인 자동 매매를 설정합니다.")
-    @app_commands.describe(coin="매매할 코인을 선택하세요")
-    @app_commands.choices(coin=SUPPORTED_COINS)
+    @app_commands.describe(coin="매매할 코인을 검색하세요 (한글명·영문명·심볼 모두 지원)")
+    @app_commands.autocomplete(coin=coin_autocomplete)
     async def settings_command(
-        self, interaction: discord.Interaction, coin: app_commands.Choice[str]
+        self, interaction: discord.Interaction, coin: str
     ) -> None:
         # API 키 가드: 미등록 유저에게 /키등록 안내 후 모달 차단
         user_id = str(interaction.user.id)
@@ -289,7 +363,7 @@ class SettingsCog(commands.Cog):
             await interaction.response.send_message(embed=_make_onboarding_embed(), ephemeral=True)
             return
 
-        modal = TradingSettingModal(symbol=coin.value, bot=self.bot)
+        modal = TradingSettingModal(symbol=coin, bot=self.bot)
         await interaction.response.send_modal(modal)
     
     @app_commands.command(name="중지", description="실행 중인 자동 매매를 중지합니다.")
