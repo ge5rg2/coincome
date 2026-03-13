@@ -17,19 +17,19 @@ jobs:
           host: ${{ secrets.AWS_HOST }}
           username: ${{ secrets.AWS_USERNAME }}
           key: ${{ secrets.AWS_SSH_KEY }}
-    script: |
-      cd /home/ubuntu/coincome
-      git pull origin main
+          script: |
+            cd /home/ubuntu/coincome
+            git pull origin main
 
-      # 1. 기존 봇을 먼저 완전히 종료해서 메모리를 싹 비웁니다.
-      docker-compose stop app
-      docker-compose rm -f app
+            # 1. 기존 봇을 먼저 완전히 종료해서 메모리를 싹 비웁니다.
+            docker-compose stop app
+            docker-compose rm -f app
 
-      # 2. 쾌적한 상태에서 새 코드로 컨테이너를 빌드합니다.
-      docker-compose build app
+            # 2. 쾌적한 상태에서 새 코드로 컨테이너를 빌드합니다.
+            docker-compose build app
 
-      # 3. 새 봇을 실행합니다.
-      docker-compose up -d app
+            # 3. 새 봇을 실행합니다.
+            docker-compose up -d app
 
-      # 4. 쓰레기 청소
-      docker image prune -f
+            # 4. 쓰레기 청소
+            docker image prune -f
