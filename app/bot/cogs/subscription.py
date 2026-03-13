@@ -21,7 +21,7 @@ TIER_PRICES = {
 }
 
 TIER_BENEFITS = {
-    SubscriptionTier.FREE: "• 코인 1개 동시 운영\n• 최대 투자금 10만 원\n• 기본 알림",
+    SubscriptionTier.FREE: "• 코인 2개 동시 운영\n• 최대 투자금 10만 원\n• 기본 알림",
     SubscriptionTier.PRO: "• 코인 무제한 동시 운영\n• 투자금 무제한\n• 트레일링 스탑 기능\n• 상세 수익 통계",
     SubscriptionTier.VIP: "• PRO 모든 기능\n• 우선 지원 채널\n• 전략 커스텀 설정",
 }

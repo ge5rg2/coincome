@@ -1,0 +1,31 @@
+name: Deploy to AWS Lightsail
+
+# main 브랜치에 push(또는 PR Merge)가 일어날 때만 실행
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: SSH to Lightsail and Deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AWS_HOST }}
+          username: ${{ secrets.AWS_USERNAME }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          script: |
+            # 서버 접속 후 실행될 명령어들
+            cd /home/ubuntu/coincome
+
+            # 최신 코드 당겨오기
+            git pull origin main
+
+            # 도커 다시 빌드하고 무중단 재시작하기
+            docker-compose up --build -d
+
+            # 쓰레기(사용하지 않는 도커 이미지) 청소해서 용량 확보
+            docker image prune -f

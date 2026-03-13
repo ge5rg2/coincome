@@ -35,6 +35,10 @@ services:
       # 로컬 개발 시에는 코드를 바로 반영하기 위해 마운트 (운영 시에는 제거 가능)
       - .:/app
       - /app/venv/
+    environment:
+      - LANG=ko_KR.UTF-8
+      - LC_ALL=ko_KR.UTF-8
+      - PYTHONIOENCODING=utf-8
 
 volumes:
   # 데이터베이스 데이터가 서버가 꺼져도 날아가지 않도록 보존하는 영구 저장소

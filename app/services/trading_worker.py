@@ -27,8 +27,9 @@ from app.services.websocket import UpbitWebsocketManager
 
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 1.0       # 초 (메모리 읽기 — CPU 부하 없음)
-PRICE_WAIT_TIMEOUT = 5.0  # 초 — 매수 전 WebSocket 가격 수신 대기 최대 시간
+POLL_INTERVAL = 1.0        # 초 (메모리 읽기 — CPU 부하 없음)
+PRICE_WAIT_TIMEOUT = 5.0   # 초 — 매수 전 WebSocket 가격 수신 대기 최대 시간
+MIN_SELL_ORDER_KRW = 5_000  # 업비트 최소 주문 금액 — 이 미만이면 매도 불가 판단
 
 
 @dataclass
@@ -261,16 +262,67 @@ class TradingWorker:
     # ------------------------------------------------------------------
 
     async def _sell(self, current_price: float, profit_pct: float, reason: str) -> None:
-        """시장가 매도 실행 후 DB를 초기화하고 Discord 알림을 전송한다."""
+        """실제 잔고를 확인한 뒤 수량을 보정하여 시장가 매도를 실행한다.
+
+        insufficient_funds_ask 방지를 위해 매도 직전 업비트 실제 free 잔고를 조회하고
+        세 가지 경로로 분기한다.
+
+        1. 잔고 조회 실패(네트워크 오류): 이번 사이클 건너뛰고 다음 주기에 재시도.
+        2. 잔고 × 현재가 < MIN_SELL_ORDER_KRW: 수동 매도 추정 → DB 정리 후 안전 종료.
+        3. 정상 범위 잔고: min(actual, db) 수량으로 매도 (수수료·소수점 오차 자동 보정).
+        """
         pos = self._position
         if pos is None:
             return
 
-        order = await self.exchange.create_market_sell_order(self.symbol, pos.amount_coin)
-        # order["average"] 키가 존재하더라도 Upbit ccxt는 즉시 응답에서 None을 반환하는 경우가 있음
-        # → dict.get() default는 키 부재 시에만 동작하므로, or 연산으로 None 폴백 처리
+        # ── 1. 실제 가용 잔고 조회 ─────────────────────────────────────
+        try:
+            actual_balance = await self.exchange.fetch_coin_balance(self.symbol)
+        except Exception as exc:
+            # 일시적 네트워크 오류 — 이번 사이클 스킵, 다음 폴링 주기에서 재시도
+            logger.warning(
+                "잔고 조회 실패 (매도 스킵, 다음 주기 재시도): setting_id=%s err=%s",
+                self.setting_id, exc,
+            )
+            return
+
+        # ── 2. 수량 보정 ───────────────────────────────────────────────
+        # 봇이 매수한 수량 이상은 매도하지 않아 의도치 않은 추가 코인 매도를 방지한다.
+        sell_amount = min(actual_balance, pos.amount_coin)
+
+        if actual_balance < pos.amount_coin:
+            logger.info(
+                "매도 수량 보정(오차 %.6f): setting_id=%s DB=%.6f → 실제=%.6f",
+                pos.amount_coin - actual_balance,
+                self.setting_id, pos.amount_coin, actual_balance,
+            )
+
+        # ── 3. 최소 주문 미만 → 수동 매도 추정, DB 정리 후 안전 종료 ──
+        if sell_amount * current_price < MIN_SELL_ORDER_KRW:
+            logger.warning(
+                "실제 잔고 부족으로 매도 취소 (수동 매도 추정): "
+                "setting_id=%s actual=%.6f value≈%.0f KRW",
+                self.setting_id, actual_balance, actual_balance * current_price,
+            )
+            await self.notify(
+                self.user_id,
+                f"⚠️ **감시 종료** `{self.symbol}`\n"
+                f"실제 코인 잔고(`{actual_balance:.6f}`)가 최소 주문 금액"
+                f"({MIN_SELL_ORDER_KRW:,.0f} KRW) 미만입니다.\n"
+                f"수동으로 이미 매도되었거나 다른 주문에 묶여 있을 수 있습니다.\n"
+                f"DB 포지션만 초기화하고 감시를 종료합니다.",
+            )
+            await self._clear_position_from_db()
+            self._position = None
+            self.stop()
+            return
+
+        # ── 4. 시장가 매도 실행 ────────────────────────────────────────
+        order = await self.exchange.create_market_sell_order(self.symbol, sell_amount)
+        # order["average"] 키가 존재하더라도 Upbit ccxt는 즉시 응답에서 None을 반환할 수 있음
+        # → or 연산으로 None 폴백 처리
         sell_price = float(order.get("average") or current_price)
-        realized_pnl = (sell_price - pos.buy_price) * pos.amount_coin
+        realized_pnl = (sell_price - pos.buy_price) * sell_amount
 
         # ── DB 초기화 (is_running=False, buy_price/amount_coin=NULL) ──
         await self._clear_position_from_db()

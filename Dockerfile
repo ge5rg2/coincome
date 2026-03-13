@@ -14,7 +14,9 @@ ENV PYTHONUNBUFFERED=1
 
 # 5. 필수 패키지 설치
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# pip 자체를 최신으로 업데이트하고, 경고 무시 옵션을 추가하여 설치
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir --root-user-action=ignore -r requirements.txt
 
 # 6. 소스 코드 전체 복사
 COPY . .
