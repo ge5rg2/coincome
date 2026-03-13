@@ -23,13 +23,17 @@ class CoinComeBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self) -> None:
+        from app.bot.cogs.ai_trading import AITradingCog
         from app.bot.cogs.report import ReportCog
         from app.bot.cogs.settings import SettingsCog
         from app.bot.cogs.subscription import SubscriptionCog
+        from app.bot.tasks.ai_manager import AIFundManagerTask
 
         await self.add_cog(SettingsCog(self))
         await self.add_cog(SubscriptionCog(self))
         await self.add_cog(ReportCog(self))
+        await self.add_cog(AITradingCog(self))
+        await self.add_cog(AIFundManagerTask(self))
 
         if settings.discord_guild_id:
             guild = discord.Object(id=settings.discord_guild_id)

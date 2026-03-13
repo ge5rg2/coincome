@@ -79,6 +79,14 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # ── AI 자동 매매 설정 (VIP 전용) ─────────────────────────────────
+    # ai_mode_enabled  : AI 펀드 매니저 활성화 여부 (기본 꺼짐)
+    # ai_trade_amount  : AI가 1회 매수 시 사용할 금액 (KRW, 기본 10,000)
+    # ai_max_coins     : AI가 동시에 보유할 최대 코인 수 (기본 3)
+    ai_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    ai_trade_amount: Mapped[int] = mapped_column(Integer, default=10000)
+    ai_max_coins: Mapped[int] = mapped_column(Integer, default=3)
+
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")
 

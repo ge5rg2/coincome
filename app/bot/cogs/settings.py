@@ -277,6 +277,117 @@ class TradingSettingModal(discord.ui.Modal, title="매매 설정"):
 
         await interaction.followup.send(summary, ephemeral=True)
 
+
+# ---------------------------------------------------------
+# 감시 중인 코인 재선택 시 — 익절/손절만 수정하는 경량 Modal
+# ---------------------------------------------------------
+
+class UpdateModal(discord.ui.Modal, title="수익 설정 변경"):
+    """이미 감시 중인 코인의 익절·손절 목표만 수정하는 Modal.
+
+    신규 매수를 진행하지 않고 DB의 target_profit_pct / stop_loss_pct 만 UPDATE 한다.
+    실행 중인 워커의 인메모리 포지션도 즉시 반영해 다음 폴링 주기부터 새 기준이 적용된다.
+
+    Args:
+        setting: 현재 감시 중인 BotSetting 인스턴스 (기존 설정값 pre-fill에 사용).
+        bot: Discord 봇 인스턴스 (WorkerRegistry 접근용).
+    """
+
+    def __init__(self, setting: BotSetting, bot: commands.Bot) -> None:
+        super().__init__()
+        self.setting_id = setting.id
+        self.symbol = setting.symbol
+        self.bot = bot
+
+        # 기존 설정값을 TextInput.default 에 넣어 유저가 바로 확인·수정 가능하게 함
+        tp_default = (
+            f"{float(setting.target_profit_pct):.1f}"
+            if setting.target_profit_pct is not None
+            else ""
+        )
+        sl_default = (
+            f"{float(setting.stop_loss_pct):.1f}"
+            if setting.stop_loss_pct is not None
+            else ""
+        )
+
+        self.target_profit = discord.ui.TextInput(
+            label="익절 목표 (%)",
+            placeholder="예: 3.5  (비워두면 미설정)",
+            required=False,
+            max_length=6,
+            default=tp_default,
+        )
+        self.stop_loss = discord.ui.TextInput(
+            label="손절 지점 (%)",
+            placeholder="예: 2.0  (비워두면 미설정)",
+            required=False,
+            max_length=6,
+            default=sl_default,
+        )
+        self.add_item(self.target_profit)
+        self.add_item(self.stop_loss)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        # ── 입력값 파싱 ───────────────────────────────────────────────
+        try:
+            target_pct = (
+                float(self.target_profit.value)
+                if self.target_profit.value.strip()
+                else None
+            )
+            stop_pct = (
+                float(self.stop_loss.value)
+                if self.stop_loss.value.strip()
+                else None
+            )
+        except ValueError:
+            await interaction.followup.send(
+                "❌ 숫자 형식이 올바르지 않습니다.", ephemeral=True
+            )
+            return
+
+        # ── DB 업데이트 (신규 매수 없이 목표치만 수정) ───────────────
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(BotSetting).where(BotSetting.id == self.setting_id)
+            )
+            setting = result.scalar_one_or_none()
+            if setting is None:
+                await interaction.followup.send(
+                    "❌ 설정을 찾을 수 없습니다.", ephemeral=True
+                )
+                return
+            setting.target_profit_pct = target_pct
+            setting.stop_loss_pct = stop_pct
+            await db.commit()
+
+        # ── 실행 중인 워커 인메모리 상태 즉시 반영 ───────────────────
+        # 다음 폴링 주기(_check_exit_conditions)부터 새 기준으로 동작.
+        worker = WorkerRegistry.get().get_worker(self.setting_id)
+        if worker is not None:
+            worker.target_profit_pct = target_pct
+            worker.stop_loss_pct = stop_pct
+            if worker._position is not None:
+                worker._position.target_profit_pct = target_pct
+                worker._position.stop_loss_pct = stop_pct
+            logger.info(
+                "워커 수익 설정 인메모리 반영: setting_id=%s tp=%s sl=%s",
+                self.setting_id, target_pct, stop_pct,
+            )
+
+        tp_str = f"+{target_pct:.1f}%" if target_pct is not None else "미설정"
+        sl_str = f"-{stop_pct:.1f}%" if stop_pct is not None else "미설정"
+        await interaction.followup.send(
+            f"✅ **`{self.symbol}` 설정이 업데이트되었습니다.**\n"
+            f"익절: **{tp_str}**  |  손절: **{sl_str}**\n"
+            f"_(다음 폴링 주기부터 새 기준이 적용됩니다)_",
+            ephemeral=True,
+        )
+
+
 # ---------------------------------------------------------
 # 중지 명령어용 드롭다운 메뉴 (Select) UI
 # ---------------------------------------------------------
@@ -354,16 +465,37 @@ class SettingsCog(commands.Cog):
     async def settings_command(
         self, interaction: discord.Interaction, coin: str
     ) -> None:
-        # API 키 가드: 미등록 유저에게 /키등록 안내 후 모달 차단
         user_id = str(interaction.user.id)
+
         async with AsyncSessionLocal() as db:
+            # ── API 키 가드 ───────────────────────────────────────────
             result = await db.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
-        if user is None or not user.upbit_access_key or not user.upbit_secret_key:
-            await interaction.response.send_message(embed=_make_onboarding_embed(), ephemeral=True)
-            return
+            if user is None or not user.upbit_access_key or not user.upbit_secret_key:
+                await interaction.response.send_message(
+                    embed=_make_onboarding_embed(), ephemeral=True
+                )
+                return
 
-        modal = TradingSettingModal(symbol=coin, bot=self.bot)
+            # ── 이미 감시 중인 코인인지 확인 ─────────────────────────
+            # 동일 심볼이 is_running=True 로 존재하면 신규 매수 대신
+            # 익절/손절 목표치만 수정하는 UpdateModal 을 띄운다.
+            existing_result = await db.execute(
+                select(BotSetting).where(
+                    BotSetting.user_id == user_id,
+                    BotSetting.symbol == coin,
+                    BotSetting.is_running.is_(True),
+                )
+            )
+            existing = existing_result.scalar_one_or_none()
+
+        if existing is not None:
+            # 재선택 → 익절/손절만 수정 (기존값 pre-fill)
+            modal = UpdateModal(setting=existing, bot=self.bot)
+        else:
+            # 신규 선택 → 매수금액·익절·손절 전체 설정
+            modal = TradingSettingModal(symbol=coin, bot=self.bot)
+
         await interaction.response.send_modal(modal)
     
     @app_commands.command(name="중지", description="실행 중인 자동 매매를 중지합니다.")
