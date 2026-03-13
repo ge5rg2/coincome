@@ -1,18 +1,23 @@
 """
-AIFundManagerTask: 4시간마다 AI 종목 픽 → 자동 매수 → DM 리포트 스케줄러.
+AIFundManagerTask: 4시간마다 포지션 리뷰 → 신규 매수 → DM 통합 리포트.
 
 전체 데이터 흐름 (1 사이클):
   MarketDataManager._cache
       ↓  get_all()
-  AITraderService.analyze_market(market_data, holding_symbols)
-      ↓  picks (최대 2개)
-  ExchangeService.create_market_buy_order(symbol, ai_trade_amount)
-      ↓  order (체결 결과)
-  BotSetting INSERT (buy_price·amount_coin·target_profit_pct·stop_loss_pct·is_running=True)
-      ↓
-  TradingWorker.start() → 포지션 복구 경로로 진입 → 매도 감시 루프
-      ↓
-  Discord DM Embed (매수 리포트)
+  [Step 1] 기존 포지션 리뷰
+      AITraderService.review_positions(positions_data, market_data)
+          ↓  reviews (MAINTAIN / UPDATE)
+      UPDATE: BotSetting DB 갱신 + TradingWorker 인메모리 동기화
+  [Step 2] 신규 종목 발굴 (슬롯 여유가 있을 때만)
+      current_count = is_running 포지션 수
+      slots = ai_max_coins - current_count
+      AITraderService.analyze_market(market_data, holding_symbols)
+          ↓  picks (최대 slots 개)
+      ExchangeService.create_market_buy_order(symbol, ai_trade_amount)
+          ↓  order
+      BotSetting INSERT + TradingWorker.start()
+  [Step 3] 단일 통합 DM Embed 전송
+      신규 매수 + 갱신된 포지션 + 유지된 포지션 모두 1개 Embed로 전송
 
 Rate-Limit 방지:
   - 유저 간 asyncio.sleep(1)
@@ -41,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 class AIFundManagerTask(commands.Cog):
-    """4시간마다 AI 종목 분석·매수·DM 리포트를 수행하는 백그라운드 Cog.
+    """4시간마다 포지션 리뷰·신규 매수·DM 통합 리포트를 수행하는 백그라운드 Cog.
 
     Attributes:
         bot:        Discord 봇 인스턴스.
@@ -63,7 +68,7 @@ class AIFundManagerTask(commands.Cog):
 
     @tasks.loop(hours=4)
     async def fund_loop(self) -> None:
-        """4시간마다 AI 분석·매수를 실행하는 메인 루프.
+        """4시간마다 포지션 리뷰·신규 매수를 실행하는 메인 루프.
 
         처리 흐름:
           1. MarketDataManager 캐시 존재 확인
@@ -115,13 +120,13 @@ class AIFundManagerTask(commands.Cog):
         await self.bot.wait_until_ready()
 
     # ------------------------------------------------------------------
-    # 유저별 AI 매수 처리
+    # 유저별 전체 처리
     # ------------------------------------------------------------------
 
     async def _process_user(
         self, user: User, market_data: dict[str, dict]
     ) -> None:
-        """단일 유저에 대해 AI 분석 → 매수 → DM 리포트를 실행한다.
+        """단일 유저에 대해 포지션 리뷰 → 신규 매수 → DM 통합 리포트를 실행한다.
 
         Args:
             user:        처리 대상 User 인스턴스 (bot_settings eagerly loaded).
@@ -134,24 +139,207 @@ class AIFundManagerTask(commands.Cog):
             logger.warning("업비트 API 키 없음, 스킵: user_id=%s", user_id)
             return
 
-        # 현재 감시 중인 코인 집합 (AI 픽 제외 대상)
-        holding_symbols: set[str] = {
-            s.symbol for s in user.bot_settings if s.is_running
-        }
-
-        # ── AI 분석 요청 ─────────────────────────────────────────────
-        picks = await self.ai_service.analyze_market(market_data, holding_symbols)
-        if not picks:
-            logger.info("AI 픽 없음: user_id=%s", user_id)
-            return
-
-        exchange = ExchangeService(
+        exchange  = ExchangeService(
             access_key=user.upbit_access_key,
             secret_key=user.upbit_secret_key,
         )
         ws_manager = UpbitWebsocketManager.get()
         registry   = WorkerRegistry.get()
-        bought: list[dict] = []   # 성공한 매수 내역 (DM 리포트용)
+
+        # 현재 감시 중인 running 포지션 목록 (BotSetting, buy_price 있는 것만)
+        running_settings = [s for s in user.bot_settings if s.is_running]
+        ai_max_coins     = user.ai_max_coins  # 최대 동시 보유 종목 수
+
+        # DM 통합 리포트용 수집 버킷
+        reviewed_positions: list[dict] = []   # MAINTAIN / UPDATE 처리 결과
+        bought_positions: list[dict]   = []   # 신규 매수 결과
+
+        # ── Step 1: 기존 포지션 리뷰 ──────────────────────────────────
+        if running_settings:
+            await self._review_existing_positions(
+                user_id=user_id,
+                running_settings=running_settings,
+                market_data=market_data,
+                ws_manager=ws_manager,
+                registry=registry,
+                reviewed_positions=reviewed_positions,
+            )
+
+        # ── Step 2: 신규 종목 발굴 (슬롯 여유가 있을 때만) ──────────
+        current_count = len(running_settings)
+        slots         = ai_max_coins - current_count
+
+        if slots > 0:
+            holding_symbols: set[str] = {s.symbol for s in running_settings}
+            await self._buy_new_coins(
+                user=user,
+                market_data=market_data,
+                holding_symbols=holding_symbols,
+                slots=slots,
+                exchange=exchange,
+                ws_manager=ws_manager,
+                registry=registry,
+                bought_positions=bought_positions,
+            )
+        else:
+            logger.info(
+                "AI 펀드 매니저: 슬롯 없음 (보유=%d / 최대=%d) — 신규 매수 스킵: user_id=%s",
+                current_count, ai_max_coins, user_id,
+            )
+
+        # ── Step 3: 단일 통합 DM Embed 전송 ─────────────────────────
+        if reviewed_positions or bought_positions:
+            embed = self._build_unified_report_embed(
+                reviewed_positions=reviewed_positions,
+                bought_positions=bought_positions,
+            )
+            await self._send_dm_embed(user_id, embed)
+
+    # ------------------------------------------------------------------
+    # Step 1: 기존 포지션 리뷰
+    # ------------------------------------------------------------------
+
+    async def _review_existing_positions(
+        self,
+        user_id: str,
+        running_settings: list[BotSetting],
+        market_data: dict[str, dict],
+        ws_manager: UpbitWebsocketManager,
+        registry: WorkerRegistry,
+        reviewed_positions: list[dict],
+    ) -> None:
+        """보유 포지션을 AI로 리뷰해 UPDATE 시 DB·워커 인메모리를 동기화한다.
+
+        Args:
+            user_id:           Discord 사용자 ID.
+            running_settings:  is_running=True 인 BotSetting 목록.
+            market_data:       MarketDataManager.get_all() 결과.
+            ws_manager:        UpbitWebsocketManager 인스턴스.
+            registry:          WorkerRegistry 인스턴스.
+            reviewed_positions: 결과를 축적할 리스트 (DM 리포트용).
+        """
+        # ── 포지션 데이터 구성 ─────────────────────────────────────────
+        positions_data: list[dict] = []
+        for s in running_settings:
+            if s.buy_price is None:
+                continue
+            current_price = ws_manager.get_price(s.symbol)
+            if current_price is None:
+                logger.warning(
+                    "현재가 캐시 없음 (리뷰 스킵): user_id=%s symbol=%s",
+                    user_id, s.symbol,
+                )
+                continue
+            buy_price  = float(s.buy_price)
+            profit_pct = (current_price - buy_price) / buy_price * 100
+            positions_data.append(
+                {
+                    "setting_id":        s.id,
+                    "symbol":            s.symbol,
+                    "buy_price":         buy_price,
+                    "current_price":     current_price,
+                    "profit_pct":        profit_pct,
+                    "target_profit_pct": float(s.target_profit_pct or 3.0),
+                    "stop_loss_pct":     float(s.stop_loss_pct or 2.0),
+                }
+            )
+
+        if not positions_data:
+            return
+
+        # ── AI 리뷰 요청 ──────────────────────────────────────────────
+        reviews = await self.ai_service.review_positions(positions_data, market_data)
+        if not reviews:
+            logger.info("AI 포지션 리뷰 결과 없음: user_id=%s", user_id)
+            return
+
+        # ── 리뷰 결과 적용 ────────────────────────────────────────────
+        for review in reviews:
+            symbol     = review["symbol"]
+            action     = review["action"]
+            new_tgt    = review["new_target_profit_pct"]
+            new_sl     = review["new_stop_loss_pct"]
+            reason     = review["reason"]
+
+            pos = next((p for p in positions_data if p["symbol"] == symbol), None)
+            if pos is None:
+                continue
+
+            setting_id = pos["setting_id"]
+
+            if action == "UPDATE":
+                # DB 갱신
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(
+                        select(BotSetting).where(BotSetting.id == setting_id)
+                    )
+                    setting = result.scalar_one_or_none()
+                    if setting:
+                        setting.target_profit_pct = new_tgt
+                        setting.stop_loss_pct      = new_sl
+                        await db.commit()
+
+                # 워커 인메모리 동기화
+                worker = registry.get_worker(setting_id)
+                if worker:
+                    worker.target_profit_pct = new_tgt
+                    worker.stop_loss_pct      = new_sl
+                    if worker._position:
+                        worker._position.target_profit_pct = new_tgt
+                        worker._position.stop_loss_pct      = new_sl
+
+                logger.info(
+                    "AI 포지션 UPDATE: user_id=%s symbol=%s tgt=%.1f%% sl=%.1f%%",
+                    user_id, symbol, new_tgt, new_sl,
+                )
+
+            reviewed_positions.append(
+                {
+                    "symbol":        symbol,
+                    "action":        action,
+                    "profit_pct":    pos["profit_pct"],
+                    "new_target":    new_tgt,
+                    "new_sl":        new_sl,
+                    "reason":        reason,
+                }
+            )
+
+    # ------------------------------------------------------------------
+    # Step 2: 신규 종목 매수
+    # ------------------------------------------------------------------
+
+    async def _buy_new_coins(
+        self,
+        user: User,
+        market_data: dict[str, dict],
+        holding_symbols: set[str],
+        slots: int,
+        exchange: ExchangeService,
+        ws_manager: UpbitWebsocketManager,
+        registry: WorkerRegistry,
+        bought_positions: list[dict],
+    ) -> None:
+        """AI가 선정한 신규 종목을 슬롯 수만큼 시장가 매수하고 워커를 등록한다.
+
+        Args:
+            user:             처리 대상 User 인스턴스.
+            market_data:      MarketDataManager.get_all() 결과.
+            holding_symbols:  이미 보유 중인 심볼 집합 (AI 픽 제외용).
+            slots:            구매 가능한 남은 슬롯 수.
+            exchange:         ExchangeService 인스턴스.
+            ws_manager:       UpbitWebsocketManager 인스턴스.
+            registry:         WorkerRegistry 인스턴스.
+            bought_positions: 결과를 축적할 리스트 (DM 리포트용).
+        """
+        user_id = user.user_id
+
+        picks = await self.ai_service.analyze_market(market_data, holding_symbols)
+        if not picks:
+            logger.info("AI 신규 픽 없음: user_id=%s", user_id)
+            return
+
+        # 슬롯 수만큼만 매수
+        picks = picks[:slots]
 
         for pick in picks:
             symbol        = pick["symbol"]
@@ -159,7 +347,7 @@ class AIFundManagerTask(commands.Cog):
             stop_loss     = pick["stop_loss_pct"]
 
             try:
-                # ── 현재가 조회 (WebSocket 캐시 우선) ─────────────────
+                # 현재가 조회 (WebSocket 캐시 우선)
                 current_price = ws_manager.get_price(symbol)
                 if current_price is None:
                     logger.warning(
@@ -168,7 +356,7 @@ class AIFundManagerTask(commands.Cog):
                     )
                     continue
 
-                # ── 시장가 매수 실행 ──────────────────────────────────
+                # 시장가 매수 실행
                 order = await exchange.create_market_buy_order(
                     symbol, float(user.ai_trade_amount)
                 )
@@ -179,10 +367,9 @@ class AIFundManagerTask(commands.Cog):
                 )
                 buy_price = float(order.get("average") or current_price)
 
-                # ── BotSetting DB 삽입 ────────────────────────────────
+                # BotSetting DB 삽입
                 # buy_price·amount_coin을 함께 저장해 TradingWorker가
                 # _decide_entry() 에서 '포지션 복구' 경로를 타도록 유도.
-                # (신규 매수 없이 바로 매도 감시 루프로 진입)
                 async with AsyncSessionLocal() as db:
                     setting = BotSetting(
                         user_id=user_id,
@@ -198,9 +385,7 @@ class AIFundManagerTask(commands.Cog):
                     await db.commit()
                     await db.refresh(setting)
 
-                # ── TradingWorker 등록·시작 ───────────────────────────
-                # notify_callback 으로 bot._send_dm 를 전달해
-                # 익절/손절 체결 시 기존 방식대로 DM 알림.
+                # TradingWorker 등록·시작
                 worker = TradingWorker(
                     setting_id=setting.id,
                     user_id=user_id,
@@ -214,7 +399,7 @@ class AIFundManagerTask(commands.Cog):
                 await registry.register(worker)
                 worker.start()
 
-                bought.append(
+                bought_positions.append(
                     {
                         "symbol":            symbol,
                         "reason":            pick["reason"],
@@ -237,44 +422,93 @@ class AIFundManagerTask(commands.Cog):
             # 코인 간 Rate-Limit 방지
             await asyncio.sleep(0.5)
 
-        # ── DM 리포트 전송 (매수 성공 건이 있는 경우만) ───────────────
-        if bought:
-            embed = self._build_report_embed(bought)
-            await self._send_dm_embed(user_id, embed)
-
     # ------------------------------------------------------------------
-    # 리포트 Embed 빌드
+    # Step 3: 통합 리포트 Embed 빌드
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _build_report_embed(bought: list[dict]) -> discord.Embed:
-        """AI 매수 리포트 Embed를 생성한다.
+    def _build_unified_report_embed(
+        reviewed_positions: list[dict],
+        bought_positions: list[dict],
+    ) -> discord.Embed:
+        """포지션 리뷰 + 신규 매수 내역을 하나의 Embed로 통합한다.
 
         Args:
-            bought: 성공한 매수 내역 딕셔너리 리스트.
+            reviewed_positions: 리뷰 결과 딕셔너리 리스트.
+            bought_positions:   신규 매수 딕셔너리 리스트.
 
         Returns:
-            매수 코인·이유·목표를 담은 discord.Embed.
+            통합 discord.Embed 객체.
         """
+        total = len(reviewed_positions) + len(bought_positions)
         embed = discord.Embed(
-            title="🤖 [AI 펀드 매니저] 매수 리포트",
-            description=f"AI가 **{len(bought)}개** 종목을 자동 매수했습니다.",
+            title="🤖 [AI 펀드 매니저] 4시간 종합 리포트",
+            description=f"총 **{total}개** 종목을 처리했습니다.",
             color=discord.Color.blue(),
         )
 
-        for item in bought:
-            tp_str = f"+{item['target_profit_pct']:.1f}%"
-            sl_str = f"-{item['stop_loss_pct']:.1f}%"
-            value = (
-                f"**매수가:** {item['buy_price']:,.0f} KRW\n"
-                f"**수량:** {item['amount_coin']:.6f}\n"
-                f"**익절 목표:** {tp_str}  |  **손절 기준:** {sl_str}\n"
-                f"**AI 분석:** {item['reason']}"
+        # ── 신규 매수 섹션 ────────────────────────────────────────────
+        if bought_positions:
+            embed.add_field(
+                name=f"🟢 신규 매수 ({len(bought_positions)}건)",
+                value="\u200b",   # 섹션 헤더 (빈 값 대체)
+                inline=False,
             )
-            embed.add_field(name=f"🪙 {item['symbol']}", value=value, inline=False)
+            for item in bought_positions:
+                tp_str = f"+{item['target_profit_pct']:.1f}%"
+                sl_str = f"-{item['stop_loss_pct']:.1f}%"
+                value = (
+                    f"**매수가:** {item['buy_price']:,.0f} KRW\n"
+                    f"**수량:** {item['amount_coin']:.6f}\n"
+                    f"**익절 목표:** {tp_str}  |  **손절 기준:** {sl_str}\n"
+                    f"**AI 분석:** {item['reason']}"
+                )
+                embed.add_field(
+                    name=f"🪙 {item['symbol']} [신규]",
+                    value=value,
+                    inline=False,
+                )
+
+        # ── 포지션 갱신 섹션 ──────────────────────────────────────────
+        updated = [r for r in reviewed_positions if r["action"] == "UPDATE"]
+        if updated:
+            embed.add_field(
+                name=f"🔄 목표 갱신 ({len(updated)}건)",
+                value="\u200b",
+                inline=False,
+            )
+            for item in updated:
+                profit_emoji = "📈" if item["profit_pct"] >= 0 else "📉"
+                value = (
+                    f"**현재 수익률:** {item['profit_pct']:+.2f}%  {profit_emoji}\n"
+                    f"**새 익절 목표:** +{item['new_target']:.1f}%  |  "
+                    f"**새 손절 기준:** -{item['new_sl']:.1f}%\n"
+                    f"**AI 판단:** {item['reason']}"
+                )
+                embed.add_field(
+                    name=f"🪙 {item['symbol']} [갱신]",
+                    value=value,
+                    inline=False,
+                )
+
+        # ── 포지션 유지 섹션 ──────────────────────────────────────────
+        maintained = [r for r in reviewed_positions if r["action"] == "MAINTAIN"]
+        if maintained:
+            lines = []
+            for item in maintained:
+                profit_emoji = "📈" if item["profit_pct"] >= 0 else "📉"
+                lines.append(
+                    f"• **{item['symbol']}** — "
+                    f"{item['profit_pct']:+.2f}% {profit_emoji} — {item['reason']}"
+                )
+            embed.add_field(
+                name=f"✅ 기존 목표 유지 ({len(maintained)}건)",
+                value="\n".join(lines),
+                inline=False,
+            )
 
         embed.set_footer(
-            text="이후 익절·손절은 기존 워커가 자동으로 처리합니다. | /잔고 로 현황 확인 가능"
+            text="익절·손절은 워커가 자동 처리 | /잔고 로 현황 확인 가능"
         )
         return embed
 

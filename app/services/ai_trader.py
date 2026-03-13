@@ -6,13 +6,30 @@ analyze_market() 호출 흐름:
   2. GPT-4o-mini 에 system·user 프롬프트 전송 (JSON 출력 강제)
   3. 응답 JSON 파싱 → 보유 코인 제외 · 최대 2개 제한 후 반환
 
-반환 형식:
+반환 형식 (analyze_market):
   [
     {
       "symbol":            "BTC/KRW",
       "reason":            "RSI 30 이하 과매도 및 20MA 지지",
       "target_profit_pct": 5.0,   # 양수 (예: 5.0 → 매수가 대비 +5%)
       "stop_loss_pct":     3.0,   # 양수 (예: 3.0 → 매수가 대비 -3%)
+    },
+    ...
+  ]
+
+review_positions() 호출 흐름:
+  1. 현재 보유 포지션 데이터 + MarketDataManager 캐시 → 프롬프트 구성
+  2. GPT-4o-mini 에 포지션 관리 시스템 프롬프트 + 유저 프롬프트 전송
+  3. 응답 JSON 파싱 → MAINTAIN/UPDATE 리뷰 리스트 반환
+
+반환 형식 (review_positions):
+  [
+    {
+      "symbol":              "BTC/KRW",
+      "action":              "MAINTAIN" | "UPDATE",
+      "new_target_profit_pct": 5.0,   # 양수
+      "new_stop_loss_pct":     3.0,   # 양수
+      "reason":              "...",
     },
     ...
   ]
@@ -61,6 +78,38 @@ _SYSTEM_PROMPT = """\
 - target_profit_pct: 양수 (예: 5.0 → 매수가 대비 +5% 목표)
 - stop_loss_pct: 양수 (예: 3.0 → 매수가 대비 -3% 손절)
 - picks가 없으면 반드시: {"picks": []}
+"""
+
+# ------------------------------------------------------------------
+# 포지션 리뷰용 시스템 프롬프트
+# ------------------------------------------------------------------
+
+_REVIEW_SYSTEM_PROMPT = """\
+너는 현재 보유 중인 코인의 포지션을 관리하는 AI야.
+
+각 코인의 매수가·현재가·수익률·현재 익절/손절 기준과 최신 4시간 봉 RSI·MA 지표를 함께 보고,
+기존 설정을 유지할지(MAINTAIN) 아니면 현재 추세에 맞춰 변경할지(UPDATE) 결정해.
+
+반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
+{
+  "reviews": [
+    {
+      "symbol":                "BTC/KRW",
+      "action":                "MAINTAIN",
+      "new_target_profit_pct": 5.0,
+      "new_stop_loss_pct":     3.0,
+      "reason":                "추세 유지 중, 기존 목표 적절"
+    }
+  ]
+}
+
+규칙:
+- action은 반드시 "MAINTAIN" 또는 "UPDATE" 중 하나
+- action=MAINTAIN이면 new_target_profit_pct/new_stop_loss_pct는 기존 값 그대로 반환
+- action=UPDATE이면 현재 시장 상황에 맞는 새 값을 제안
+- new_target_profit_pct: 양수 (예: 5.0 → 매수가 대비 +5% 목표)
+- new_stop_loss_pct: 양수 (예: 3.0 → 매수가 대비 -3% 손절)
+- 보수적으로 접근하고, 확실한 근거가 없으면 MAINTAIN을 선택해
 """
 
 
@@ -183,5 +232,137 @@ class AITraderService:
             "AITraderService 분석 완료: %d 개 픽 %s",
             len(validated),
             [v["symbol"] for v in validated],
+        )
+        return validated
+
+    async def review_positions(
+        self,
+        positions_data: list[dict],
+        market_data: dict[str, dict],
+    ) -> list[dict]:
+        """현재 보유 포지션의 익절/손절 기준을 AI가 재검토한다.
+
+        각 포지션의 수익률과 최신 4h 봉 RSI·MA 지표를 함께 AI에 전달해
+        기존 설정 유지(MAINTAIN) 또는 갱신(UPDATE) 여부를 결정한다.
+
+        Args:
+            positions_data: 보유 포지션 리스트.
+                            각 항목: {
+                                "symbol":            str,
+                                "buy_price":         float,
+                                "current_price":     float,
+                                "profit_pct":        float,
+                                "target_profit_pct": float,
+                                "stop_loss_pct":     float,
+                            }
+            market_data: MarketDataManager.get_all() 반환값 (RSI·MA 지표 포함).
+
+        Returns:
+            리뷰 리스트:
+            [{"symbol", "action", "new_target_profit_pct", "new_stop_loss_pct", "reason"}, ...]
+            처리 불가 시 빈 리스트 반환.
+        """
+        if not positions_data:
+            return []
+
+        if not settings.openai_api_key:
+            logger.error("AITraderService: OPENAI_API_KEY 미설정")
+            return []
+
+        # ── 유저 프롬프트 구성 ────────────────────────────────────────
+        lines: list[str] = ["# 현재 보유 포지션\n"]
+        for pos in positions_data:
+            symbol       = pos["symbol"]
+            buy_price    = pos["buy_price"]
+            cur_price    = pos["current_price"]
+            profit_pct   = pos["profit_pct"]
+            tgt          = pos["target_profit_pct"]
+            sl           = pos["stop_loss_pct"]
+
+            # 최신 차트 지표 보강
+            mdata   = market_data.get(symbol, {})
+            rsi14   = mdata.get("rsi14")
+            ma20    = mdata.get("ma20")
+            rsi_str = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
+            ma_str  = f"{ma20:,.0f}" if ma20  is not None else "N/A"
+
+            lines.append(
+                f"- {symbol}: "
+                f"매수가={buy_price:,.0f}KRW  현재가={cur_price:,.0f}KRW  "
+                f"수익률={profit_pct:+.2f}%  "
+                f"목표익절={tgt:.1f}%  손절기준={sl:.1f}%  "
+                f"RSI14={rsi_str}  MA20={ma_str}"
+            )
+
+        user_prompt = "\n".join(lines)
+        logger.debug("AITraderService(review) 프롬프트:\n%s", user_prompt)
+
+        # ── OpenAI 호출 ───────────────────────────────────────────────
+        try:
+            response = await self._client.chat.completions.create(
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_prompt},
+                ],
+                temperature=0.2,   # 포지션 관리는 더 보수적으로
+                max_tokens=512,
+            )
+        except Exception as exc:
+            logger.error("AITraderService(review) OpenAI 호출 실패: %s", exc)
+            return []
+
+        raw = response.choices[0].message.content or "{}"
+        logger.debug("AITraderService(review) 응답: %s", raw)
+
+        # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            logger.error("AITraderService(review) JSON 파싱 실패: %s | raw=%s", exc, raw)
+            return []
+
+        reviews_raw: list[dict] = result.get("reviews", [])
+        valid_symbols = {pos["symbol"] for pos in positions_data}
+
+        validated: list[dict] = []
+        for r in reviews_raw:
+            if not isinstance(r, dict):
+                continue
+            symbol = r.get("symbol", "")
+            action = str(r.get("action", "MAINTAIN")).upper()
+            if not symbol or symbol not in valid_symbols:
+                continue
+            if action not in ("MAINTAIN", "UPDATE"):
+                action = "MAINTAIN"
+
+            # 기존 포지션 기본값 (MAINTAIN 시 기존 값 그대로 유지)
+            pos_defaults = next(
+                (p for p in positions_data if p["symbol"] == symbol), {}
+            )
+            validated.append(
+                {
+                    "symbol": symbol,
+                    "action": action,
+                    # 양수 강제 (AI가 음수로 반환하는 경우 방어)
+                    "new_target_profit_pct": abs(
+                        float(r.get("new_target_profit_pct",
+                                    pos_defaults.get("target_profit_pct", 3.0)))
+                    ),
+                    "new_stop_loss_pct": abs(
+                        float(r.get("new_stop_loss_pct",
+                                    pos_defaults.get("stop_loss_pct", 2.0)))
+                    ),
+                    "reason": str(r.get("reason", "")),
+                }
+            )
+
+        logger.info(
+            "AITraderService(review) 완료: %d 개 포지션 검토 "
+            "(UPDATE=%d, MAINTAIN=%d)",
+            len(validated),
+            sum(1 for v in validated if v["action"] == "UPDATE"),
+            sum(1 for v in validated if v["action"] == "MAINTAIN"),
         )
         return validated

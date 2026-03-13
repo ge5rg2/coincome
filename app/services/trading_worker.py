@@ -87,6 +87,7 @@ class TradingWorker:
 
         self._task: asyncio.Task | None = None
         self._position: Position | None = None
+        self._db_refresh_counter: int = 0   # _check_exit_conditions 호출 횟수 카운터
 
     # ------------------------------------------------------------------
     # 라이프사이클
@@ -232,10 +233,19 @@ class TradingWorker:
         """
         WebSocket 캐시의 현재가로 익절/손절 조건을 판단한다.
         REST 호출 없음 — Rate Limit 영향 없음.
+
+        약 1분(60회 폴링)마다 DB에서 target_profit_pct·stop_loss_pct 를 재조회해
+        AI 펀드 매니저가 외부에서 변경한 목표값을 인메모리에 동기화한다.
         """
         pos = self._position
         if pos is None:
             return
+
+        # ── 주기적 DB 갱신 (60회 = POLL_INTERVAL 기준 약 1분) ──────
+        self._db_refresh_counter += 1
+        if self._db_refresh_counter >= 60:
+            self._db_refresh_counter = 0
+            await self._refresh_targets_from_db()
 
         current_price = UpbitWebsocketManager.get().get_price(self.symbol)
         if current_price is None:
@@ -256,6 +266,54 @@ class TradingWorker:
 
         if should_sell:
             await self._sell(current_price, profit_pct, reason)
+
+    async def _refresh_targets_from_db(self) -> None:
+        """DB에서 target_profit_pct·stop_loss_pct 를 재조회해 인메모리를 최신화한다.
+
+        AI 펀드 매니저가 주기적으로 DB를 업데이트할 수 있으므로,
+        워커도 1분 간격으로 DB 값을 재확인해 갭을 없앤다.
+        """
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(BotSetting).where(BotSetting.id == self.setting_id)
+                )
+                setting = result.scalar_one_or_none()
+
+            if setting is None:
+                return
+
+            new_tgt = float(setting.target_profit_pct) if setting.target_profit_pct is not None else None
+            new_sl  = float(setting.stop_loss_pct)     if setting.stop_loss_pct     is not None else None
+
+            changed = (
+                new_tgt != self.target_profit_pct
+                or new_sl != self.stop_loss_pct
+            )
+
+            # 인메모리 워커 값 갱신
+            self.target_profit_pct = new_tgt
+            self.stop_loss_pct      = new_sl
+
+            # Position 객체도 동기화 (목표가·손절가 즉시 반영)
+            if self._position:
+                self._position.target_profit_pct = new_tgt
+                self._position.stop_loss_pct      = new_sl
+
+            if changed:
+                logger.info(
+                    "워커 목표값 DB 재동기화: setting_id=%s tgt=%.1f%% sl=%.1f%%",
+                    self.setting_id,
+                    new_tgt if new_tgt is not None else 0.0,
+                    new_sl  if new_sl  is not None else 0.0,
+                )
+
+        except Exception as exc:
+            # DB 재조회 실패는 치명적이지 않으므로 WARNING 수준으로만 기록
+            logger.warning(
+                "워커 목표값 DB 재조회 실패 (기존 값 유지): setting_id=%s err=%s",
+                self.setting_id, exc,
+            )
 
     # ------------------------------------------------------------------
     # 매도

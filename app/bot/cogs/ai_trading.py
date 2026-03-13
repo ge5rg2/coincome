@@ -59,7 +59,7 @@ def _make_vip_required_embed() -> discord.Embed:
 # ------------------------------------------------------------------
 
 class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
-    """AI 모드 ON/OFF 및 1회 매수 금액을 입력받는 Modal.
+    """AI 모드 ON/OFF, 1회 매수 금액, 최대 보유 종목 수를 입력받는 Modal.
 
     현재 DB 값을 default 로 pre-fill 해 유저가 기존 설정을 바로 확인·수정할 수 있다.
     """
@@ -82,8 +82,16 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
             max_length=10,
             default=str(user.ai_trade_amount),
         )
+        self.max_coins = discord.ui.TextInput(
+            label="최대 동시 보유 종목 수",
+            placeholder="예: 3  (1 ~ 10)",
+            min_length=1,
+            max_length=2,
+            default=str(user.ai_max_coins),
+        )
         self.add_item(self.mode)
         self.add_item(self.trade_amount)
+        self.add_item(self.max_coins)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -112,6 +120,20 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
             )
             return
 
+        try:
+            max_coins = int(self.max_coins.value.strip())
+        except ValueError:
+            await interaction.followup.send(
+                "❌ 최대 보유 종목 수는 숫자로 입력해 주세요.", ephemeral=True
+            )
+            return
+
+        if not 1 <= max_coins <= 10:
+            await interaction.followup.send(
+                "❌ 최대 보유 종목 수는 **1 ~ 10** 사이로 입력해 주세요.", ephemeral=True
+            )
+            return
+
         enabled = mode_str == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
@@ -125,11 +147,12 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
                 return
             user.ai_mode_enabled = enabled
             user.ai_trade_amount = amount
+            user.ai_max_coins = max_coins
             await db.commit()
 
         logger.info(
-            "AI 설정 업데이트: user_id=%s enabled=%s amount=%d",
-            self._user_id, enabled, amount,
+            "AI 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d",
+            self._user_id, enabled, amount, max_coins,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
@@ -140,6 +163,7 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
         )
         embed.add_field(name="AI 모드", value=status, inline=True)
         embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
+        embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
 
         if enabled:
             embed.set_footer(
