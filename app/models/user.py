@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, String
+from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -68,6 +68,16 @@ class User(Base):
     subscription_tier: Mapped[str] = mapped_column(String(50), default=SubscriptionTier.FREE)
     sub_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # ── 정기 보고 설정 ────────────────────────────────────────────────
+    # report_enabled         : 보고 DM 수신 여부 (기본 켜짐)
+    # report_interval_hours  : 보고 주기 (허용값: 1 / 3 / 6 / 12 / 24)
+    # last_report_sent_at    : 마지막 보고 전송 시각 (주기 계산에 사용)
+    report_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    report_interval_hours: Mapped[int] = mapped_column(Integer, default=1)
+    last_report_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")
