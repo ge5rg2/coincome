@@ -13,6 +13,7 @@ from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import select
 
+from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
 from app.models.user import User
@@ -21,11 +22,56 @@ from app.services.trading_worker import TradingWorker, WorkerRegistry
 
 logger = logging.getLogger(__name__)
 
-# API 키 미등록 신규 유저 안내 메시지 (공통)
-_ONBOARDING_MSG = (
-    "⚠️ 코인 자동 매매를 사용하려면 먼저 업비트 API 키 등록이 필요합니다.\n"
-    "채팅창에 `/키등록` 명령어를 입력해 주세요!"
-)
+
+def _make_onboarding_embed() -> discord.Embed:
+    """API 키 미등록 신규 유저에게 보여줄 보안 가이드 Embed를 반환한다.
+
+    업비트 API 키 생성 시 권한 설정 및 IP 화이트리스트 가이드를 포함한다.
+    """
+    embed = discord.Embed(
+        title="🔑 업비트 API 키 등록이 필요합니다",
+        description=(
+            "코인 자동 매매를 사용하려면 먼저 `/키등록` 명령어로 업비트 API 키를 등록해야 합니다.\n"
+            "키 발급 전 반드시 아래 보안 가이드를 확인하세요."
+        ),
+        color=discord.Color.orange(),
+    )
+    embed.add_field(
+        name="✅ 허용 권한 (3가지만 체크)",
+        value="- 자산조회\n- 주문조회\n- 주문하기",
+        inline=True,
+    )
+    embed.add_field(
+        name="🚫 절대 금지",
+        value="- ~~출금하기~~\n- ~~입금하기~~",
+        inline=True,
+    )
+    embed.add_field(
+        name="🌐 IP 화이트리스트 등록 필수",
+        value=f"업비트 API 설정에서 아래 IP **만** 허용하도록 설정하세요.\n```{settings.server_ip}```",
+        inline=False,
+    )
+    embed.set_footer(text="보안 설정 완료 후 /키등록 명령어로 키를 등록해 주세요.")
+    return embed
+
+
+def _make_key_registered_embed() -> discord.Embed:
+    """API 키 등록 완료 후 보안 재확인 Embed를 반환한다."""
+    embed = discord.Embed(
+        title="✅ API 키가 등록되었습니다.",
+        color=discord.Color.green(),
+    )
+    embed.add_field(
+        name="🔒 보안 설정 최종 확인",
+        value=(
+            "등록하신 API 키의 권한 및 IP 설정을 다시 한번 점검해 주세요.\n\n"
+            "✅ **허용 권한** — 자산조회 · 주문조회 · 주문하기만 활성화\n"
+            "🚫 **출금하기 · 입금하기는 반드시 비활성화**\n"
+            f"🌐 **IP 화이트리스트** — `{settings.server_ip}` 만 허용되도록 설정"
+        ),
+        inline=False,
+    )
+    return embed
 
 # 지원 코인 목록
 SUPPORTED_COINS = [
@@ -240,7 +286,7 @@ class SettingsCog(commands.Cog):
             result = await db.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
         if user is None or not user.upbit_access_key or not user.upbit_secret_key:
-            await interaction.response.send_message(_ONBOARDING_MSG, ephemeral=True)
+            await interaction.response.send_message(embed=_make_onboarding_embed(), ephemeral=True)
             return
 
         modal = TradingSettingModal(symbol=coin.value, bot=self.bot)
@@ -255,7 +301,7 @@ class SettingsCog(commands.Cog):
             user_result = await db.execute(select(User).where(User.user_id == user_id))
             user = user_result.scalar_one_or_none()
             if user is None or not user.upbit_access_key or not user.upbit_secret_key:
-                await interaction.response.send_message(_ONBOARDING_MSG, ephemeral=True)
+                await interaction.response.send_message(embed=_make_onboarding_embed(), ephemeral=True)
                 return
 
             # 현재 실행 중인 설정(코인) 목록 가져오기
@@ -293,7 +339,7 @@ class SettingsCog(commands.Cog):
             user.upbit_access_key = access_key
             user.upbit_secret_key = secret_key
             await db.commit()
-        await interaction.response.send_message("✅ API 키가 등록되었습니다.", ephemeral=True)
+        await interaction.response.send_message(embed=_make_key_registered_embed(), ephemeral=True)
 
     @app_commands.command(name="잔고", description="현재 감시 중인 코인의 수익률과 상태를 확인합니다.")
     async def status_command(self, interaction: discord.Interaction) -> None:
@@ -306,7 +352,7 @@ class SettingsCog(commands.Cog):
             user_result = await db.execute(select(User).where(User.user_id == user_id))
             user = user_result.scalar_one_or_none()
             if user is None or not user.upbit_access_key or not user.upbit_secret_key:
-                await interaction.followup.send(_ONBOARDING_MSG, ephemeral=True)
+                await interaction.followup.send(embed=_make_onboarding_embed(), ephemeral=True)
                 return
 
             # 현재 실행 중인 봇 설정 조회
