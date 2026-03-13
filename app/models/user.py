@@ -1,10 +1,56 @@
+import logging
 from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 from app.database import Base
+
+logger = logging.getLogger(__name__)
+
+
+class EncryptedString(TypeDecorator):
+    """DB 입출력 시 AES-256(Fernet) 자동 암복호화를 수행하는 컬럼 타입.
+
+    - process_bind_param : Python → DB  (평문 → 암호문)
+    - process_result_value: DB → Python (암호문 → 평문)
+
+    비즈니스 로직(TradingWorker, ExchangeService 등)은 평문으로만 다루며
+    암호화 세부 사항에 완전히 무관(투명)하게 동작한다.
+    """
+
+    impl = String
+    cache_ok = True  # 인스턴스 상태 없음 → SQLAlchemy 캐시 허용
+
+    def process_bind_param(self, value: str | None, dialect) -> str | None:
+        """Python → DB: 평문을 Fernet 암호문으로 변환한다."""
+        if value is None:
+            return None
+        from app.utils.crypto import encrypt  # 순환 임포트 방지를 위해 지연 임포트
+
+        return encrypt(value)
+
+    def process_result_value(self, value: str | None, dialect) -> str | None:
+        """DB → Python: Fernet 암호문을 평문으로 복원한다.
+
+        마이그레이션 이전 평문 값이 남아 있는 경우 복호화에 실패하므로
+        InvalidToken 시 WARNING 을 남기고 원본 값을 그대로 반환한다.
+        마이그레이션 완료 후에는 이 경로에 진입하지 않아야 한다.
+        """
+        if value is None:
+            return None
+        from app.utils.crypto import InvalidToken, decrypt  # 지연 임포트
+
+        try:
+            return decrypt(value)
+        except (InvalidToken, Exception):
+            logger.warning(
+                "API 키 복호화 실패 — 평문으로 저장된 값으로 추정됩니다. "
+                "scripts/migrate_keys.py 실행 여부를 확인하세요."
+            )
+            return value
 
 
 class SubscriptionTier(str, Enum):
@@ -17,8 +63,8 @@ class User(Base):
     __tablename__ = "users"
 
     user_id: Mapped[str] = mapped_column(String(255), primary_key=True)  # Discord ID
-    upbit_access_key: Mapped[str | None] = mapped_column(String, nullable=True)
-    upbit_secret_key: Mapped[str | None] = mapped_column(String, nullable=True)
+    upbit_access_key: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
+    upbit_secret_key: Mapped[str | None] = mapped_column(EncryptedString, nullable=True)
     subscription_tier: Mapped[str] = mapped_column(String(50), default=SubscriptionTier.FREE)
     sub_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
