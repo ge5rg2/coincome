@@ -21,5 +21,12 @@ class Settings(BaseSettings):
 
     secret_key: str = "change-me"
 
+    # API 키 AES-256 암호화용 Fernet 키 (Base64 URL-safe 32바이트)
+    # 생성: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    encryption_key: str = ""
+
+    # 업비트 API 키 IP 화이트리스트에 등록할 서버 공인 IP
+    server_ip: str = "0.0.0.0"
+
 
 settings = Settings()
