@@ -28,5 +28,8 @@ class Settings(BaseSettings):
     # 업비트 API 키 IP 화이트리스트에 등록할 서버 공인 IP
     server_ip: str = "0.0.0.0"
 
+    # OpenAI API 키 (AI 자동 매매 펀드 매니저용)
+    openai_api_key: str = ""
+
 
 settings = Settings()

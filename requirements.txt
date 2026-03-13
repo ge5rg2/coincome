@@ -29,5 +29,6 @@ cryptography>=42.0.0
 
 # Data / AI
 pandas>=2.2.0
+openai>=1.0.0
 
 greenlet==3.3.2
