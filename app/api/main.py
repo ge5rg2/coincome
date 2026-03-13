@@ -12,6 +12,7 @@ from app.api.routers import payments, web
 from app.database import AsyncSessionLocal, Base, engine
 from app.models import BotSetting, Payment, User  # noqa: F401 — Alembic 인식용
 from app.services.exchange import ExchangeService
+from app.services.market_data import MarketDataManager
 from app.services.trading_worker import TradingWorker, WorkerRegistry
 from app.services.websocket import UpbitWebsocketManager
 
@@ -93,10 +94,16 @@ async def lifespan(app: FastAPI):
     # 3. DB에서 is_running=True 워커 복구 (포지션 유지 또는 신규 매수)
     await _recover_workers()
 
+    # 4. 시장 데이터 캐싱 매니저 시작 (AI 트레이딩용 Top N 스크리닝 · 지표 계산)
+    #    기동 직후 첫 갱신을 비동기 실행 — 완료 전에도 봇은 정상 동작.
+    market_data = MarketDataManager.get()
+    market_data.start()
+
     yield
 
-    # 4. 종료 시 WebSocket 태스크 정리
+    # 5. 종료 시 WebSocket 태스크 및 시장 데이터 루프 정리
     ws_manager.stop()
+    market_data.stop()
 
 
 def create_app() -> FastAPI:
