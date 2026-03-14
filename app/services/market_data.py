@@ -3,8 +3,10 @@ MarketDataManager: AI 자동 매매를 위한 시장 데이터 캐싱 관리자.
 
 동작 흐름 (4시간 주기 갱신):
   [1차 스크리닝]
-    ccxt fetch_tickers() 로 업비트 전체 KRW 마켓의 24h 거래대금(quoteVolume)을 조회.
-    내림차순 정렬 후 상위 TOP_N(10)개 심볼만 추출.
+    fetch_markets() 로 전체 마켓 목록을 조회한 뒤 /KRW 심볼만 추출.
+    URL 길이 제한 방어를 위해 심볼 리스트를 CHUNK_SIZE(100)개씩 분할.
+    청크마다 fetch_tickers(chunk) 를 호출해 결과를 하나의 딕셔너리로 병합.
+    24h 거래대금(quoteVolume) 내림차순 정렬 후 상위 TOP_N(10)개 심볼만 추출.
 
   [2차 정밀 캐싱]
     Top N 코인별로 4h 봉 OHLCV fetch_ohlcv() 실행 (순차 처리, 코인 간 0.5초 간격).
@@ -40,6 +42,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 TOP_N = 10               # 1차 스크리닝 선택 코인 수
+CHUNK_SIZE = 100         # fetch_tickers() 1회 호출 시 최대 심볼 수 (URL 길이 제한 방어)
+CHUNK_SLEEP = 0.3        # 청크 간 Rate-Limit 방지 대기 (초)
 REFRESH_INTERVAL = 4 * 3600  # 2차 캐싱 갱신 주기 (초)
 OHLCV_LIMIT = 60         # 4h 봉 캔들 수 (RSI14 + MA20 계산에 충분)
 COIN_SLEEP = 0.5         # 코인 간 Rate-Limit 방지 대기 (초)
@@ -185,19 +189,50 @@ class MarketDataManager:
         """전체 마켓 스크리닝 → Top N 정밀 캐싱을 순차 실행한다.
 
         비즈니스 로직:
-          1. ccxt fetch_tickers() 로 전체 KRW 마켓 24h 거래대금 수집
-          2. quoteVolume 내림차순 정렬 → 상위 TOP_N 심볼 추출
-          3. 각 심볼별 4h OHLCV → RSI(14) · MA20 계산 → del df
-          4. 결과를 self._cache 에 반영 (원자적 교체)
+          1. fetch_markets() 로 전체 마켓 목록 조회 → /KRW 심볼 필터링
+          2. 심볼 리스트를 CHUNK_SIZE 개씩 분할해 fetch_tickers(chunk) 반복 호출 후 병합
+             (업비트 최대 URL 길이 초과 오류 방어)
+          3. quoteVolume 내림차순 정렬 → 상위 TOP_N 심볼 추출
+          4. 각 심볼별 4h OHLCV → RSI(14) · MA20 계산 → del df
+          5. 결과를 self._cache 에 반영 (원자적 교체)
         """
         loop = asyncio.get_event_loop()
 
-        # ── 1차 스크리닝: 전체 KRW 마켓 거래대금 조회 ──────────────────
-        logger.info("MarketDataManager: 1차 스크리닝 시작 (fetch_tickers)")
-        tickers: dict = await loop.run_in_executor(
-            None, self._exchange.fetch_tickers
+        # ── 1차 스크리닝: 마켓 목록 조회 → KRW 필터 → 청크 분할 fetch_tickers ──
+        logger.info("MarketDataManager: 1차 스크리닝 시작 (fetch_markets)")
+
+        # 1-a. 전체 마켓 정보 조회 (ccxt 동기 호출을 executor 로 래핑)
+        markets: list[dict] = await loop.run_in_executor(
+            None, self._exchange.fetch_markets
         )
 
+        # 1-b. /KRW 심볼만 추출
+        krw_symbols: list[str] = [
+            m["symbol"]
+            for m in markets
+            if isinstance(m, dict) and m.get("symbol", "").endswith("/KRW")
+        ]
+        logger.info("KRW 마켓 심볼 추출 완료: %d 개", len(krw_symbols))
+
+        # 1-c. 100개씩 청크로 분할 → fetch_tickers(chunk) 반복 호출 후 병합
+        #      업비트는 전체 심볼을 한 번에 요청하면 URL 길이 초과가 발생하므로
+        #      CHUNK_SIZE 단위로 나눠서 호출한다.
+        tickers: dict = {}
+        total_chunks = (len(krw_symbols) + CHUNK_SIZE - 1) // CHUNK_SIZE
+
+        for idx, start in enumerate(range(0, len(krw_symbols), CHUNK_SIZE)):
+            chunk = krw_symbols[start : start + CHUNK_SIZE]
+            fetch_fn = partial(self._exchange.fetch_tickers, chunk)
+            chunk_tickers: dict = await loop.run_in_executor(None, fetch_fn)
+            tickers.update(chunk_tickers)
+            logger.debug(
+                "fetch_tickers 청크 %d/%d 완료 (%d 개)",
+                idx + 1, total_chunks, len(chunk),
+            )
+            # 청크 간 Rate-Limit 방지 대기
+            await asyncio.sleep(CHUNK_SLEEP)
+
+        # 1-d. 거래대금(quoteVolume) 기준 Top N 심볼 추출
         krw_tickers = [
             {
                 "symbol": symbol,
@@ -211,8 +246,8 @@ class MarketDataManager:
         top_symbols = [t["symbol"] for t in krw_tickers[:TOP_N]]
 
         logger.info(
-            "1차 스크리닝 완료: KRW 마켓 %d 개 → Top %d: %s",
-            len(krw_tickers), TOP_N, top_symbols,
+            "1차 스크리닝 완료: KRW 마켓 %d 개 (청크 %d 회) → Top %d: %s",
+            len(krw_tickers), total_chunks, TOP_N, top_symbols,
         )
 
         # ticker 정보 맵 (volume/change 재활용)
