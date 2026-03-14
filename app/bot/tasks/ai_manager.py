@@ -42,6 +42,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
+from app.utils.time import get_next_ai_run_time
 from app.models.user import SubscriptionTier, User
 from app.services.ai_trader import AITraderService
 from app.services.exchange import ExchangeService
@@ -559,8 +560,9 @@ class AIFundManagerTask(commands.Cog):
                 inline=False,
             )
 
+        next_time = get_next_ai_run_time()
         embed.set_footer(
-            text="익절·손절은 워커가 자동 처리 | /잔고 로 현황 확인 가능"
+            text=f"익절·손절은 워커가 자동 처리 | /잔고 로 현황 확인 가능 | 다음 리포트: {next_time}"
         )
         return embed
 

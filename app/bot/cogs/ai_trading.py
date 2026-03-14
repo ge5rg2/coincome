@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.user import SubscriptionTier, User
+from app.utils.time import get_next_ai_run_time
 
 logger = logging.getLogger(__name__)
 
@@ -166,8 +167,9 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
         embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
 
         if enabled:
+            next_time = get_next_ai_run_time()
             embed.set_footer(
-                text="다음 4시간 분석 시점에 AI가 자동으로 종목을 선택·매수합니다."
+                text=f"⏳ 다음 AI 분석 예정: {next_time} (이후 4시간 간격)"
             )
         else:
             embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
