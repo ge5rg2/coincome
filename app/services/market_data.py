@@ -307,9 +307,9 @@ class MarketDataManager:
                 }
 
                 logger.info(
-                    "캐싱 완료: %-10s  가격=%,.0f  RSI=%.1f  MA20=%.0f",
+                    "캐싱 완료: %-10s  가격=%s  RSI=%.1f  MA20=%.0f",
                     symbol,
-                    new_cache[symbol]["price"],
+                    f"{new_cache[symbol]['price']:,.0f}",
                     rsi14 if rsi14 is not None else float("nan"),
                     ma20 if ma20 is not None else float("nan"),
                 )
