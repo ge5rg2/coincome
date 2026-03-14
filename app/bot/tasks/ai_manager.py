@@ -1,7 +1,12 @@
 """
-AIFundManagerTask: 4시간마다 포지션 리뷰 → 신규 매수 → DM 통합 리포트.
+AIFundManagerTask: 업비트 4시간 봉 완성 정각(KST)에 동기화되어 실행되는 AI 펀드 매니저.
+
+트리거 시각 (KST, 업비트 4h 봉 마감 정각):
+  01:00 / 05:00 / 09:00 / 13:00 / 17:00 / 21:00
 
 전체 데이터 흐름 (1 사이클):
+  await asyncio.sleep(10)   ← 업비트 캔들 롤오버 대기
+      ↓
   MarketDataManager._cache
       ↓  get_all()
   [Step 1] 기존 포지션 리뷰
@@ -26,7 +31,9 @@ Rate-Limit 방지:
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.ext import commands, tasks
@@ -43,6 +50,24 @@ from app.services.trading_worker import TradingWorker, WorkerRegistry
 from app.services.websocket import UpbitWebsocketManager
 
 logger = logging.getLogger(__name__)
+
+# ------------------------------------------------------------------
+# 업비트 4시간 봉 마감 정각 (한국 표준시 KST = UTC+9)
+# 업비트 4h 봉은 01 / 05 / 09 / 13 / 17 / 21시에 새 봉이 열린다.
+# discord.py tasks.loop(time=...) 는 timezone-aware datetime.time 을 지원하므로
+# ZoneInfo("Asia/Seoul") 로 KST 기준 시각을 직접 지정한다.
+# ------------------------------------------------------------------
+
+_KST = ZoneInfo("Asia/Seoul")
+
+_LOOP_TIMES: list[datetime.time] = [
+    datetime.time(hour=1,  minute=0, second=0, tzinfo=_KST),
+    datetime.time(hour=5,  minute=0, second=0, tzinfo=_KST),
+    datetime.time(hour=9,  minute=0, second=0, tzinfo=_KST),
+    datetime.time(hour=13, minute=0, second=0, tzinfo=_KST),
+    datetime.time(hour=17, minute=0, second=0, tzinfo=_KST),
+    datetime.time(hour=21, minute=0, second=0, tzinfo=_KST),
+]
 
 
 class AIFundManagerTask(commands.Cog):
@@ -63,18 +88,24 @@ class AIFundManagerTask(commands.Cog):
         self.fund_loop.cancel()
 
     # ------------------------------------------------------------------
-    # 4시간 루프
+    # 업비트 4시간 봉 정각 루프 (KST 01/05/09/13/17/21시)
     # ------------------------------------------------------------------
 
-    @tasks.loop(hours=4)
+    @tasks.loop(time=_LOOP_TIMES)
     async def fund_loop(self) -> None:
-        """4시간마다 포지션 리뷰·신규 매수를 실행하는 메인 루프.
+        """업비트 4h 봉 완성 정각(KST)에 포지션 리뷰·신규 매수를 실행하는 메인 루프.
 
         처리 흐름:
+          0. 10초 대기 (업비트 서버 캔들 롤오버 안정화)
           1. MarketDataManager 캐시 존재 확인
           2. DB: VIP + ai_mode_enabled=True 유저 + bot_settings 일괄 조회
           3. 각 유저별 _process_user() 실행 (유저 간 1초 간격)
         """
+        # 업비트 서버가 새 4시간 봉 데이터를 확정적으로 반영하기까지
+        # 수 초의 롤오버 지연이 발생할 수 있다.
+        # 10초 대기로 불완전한 캔들 데이터를 읽는 경쟁 조건을 방어한다.
+        await asyncio.sleep(10)
+
         logger.info("AI 펀드 매니저 루프 실행")
 
         # 1. 마켓 데이터 캐시 확인 (MarketDataManager 초기화 전이면 스킵)
