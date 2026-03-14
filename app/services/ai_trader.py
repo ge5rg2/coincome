@@ -7,15 +7,18 @@ analyze_market() 호출 흐름:
   3. 응답 JSON 파싱 → 보유 코인 제외 · 최대 2개 제한 후 반환
 
 반환 형식 (analyze_market):
-  [
-    {
-      "symbol":            "BTC/KRW",
-      "reason":            "RSI 30 이하 과매도 및 20MA 지지",
-      "target_profit_pct": 5.0,   # 양수 (예: 5.0 → 매수가 대비 +5%)
-      "stop_loss_pct":     3.0,   # 양수 (예: 3.0 → 매수가 대비 -3%)
-    },
-    ...
-  ]
+  {
+    "market_summary":  "현재 시장 전반 분석 2~3문장.",  # 관망 이유 포함
+    "picks": [
+      {
+        "symbol":            "BTC/KRW",
+        "reason":            "RSI 30 이하 과매도 및 20MA 지지",
+        "target_profit_pct": 5.0,   # 양수 (예: 5.0 → 매수가 대비 +5%)
+        "stop_loss_pct":     3.0,   # 양수 (예: 3.0 → 매수가 대비 -3%)
+      },
+      ...
+    ]
+  }
 
 review_positions() 호출 흐름:
   1. 현재 보유 포지션 데이터 + MarketDataManager 캐시 → 프롬프트 구성
@@ -60,10 +63,11 @@ _SYSTEM_PROMPT = """\
 
 제공된 Top 10 코인의 4시간 봉 RSI·MA 지표를 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
 이미 유저가 보유 중인 코인은 반드시 제외해.
-보수적으로 접근하고, 매수할 만한 종목이 없으면 빈 리스트를 반환해.
+보수적으로 접근하고, 매수할 만한 종목이 없으면 picks를 빈 배열로 반환해.
 
 반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
 {
+  "market_summary": "현재 전체 시장 상황에 대한 분석 및 판단 근거를 2~3문장으로 요약. 매수 이유 또는 관망 이유를 명확히 서술.",
   "picks": [
     {
       "symbol":            "BTC/KRW",
@@ -75,9 +79,10 @@ _SYSTEM_PROMPT = """\
 }
 
 규칙:
+- market_summary는 관망을 선택했더라도 반드시 작성 (왜 아무것도 안 샀는지 이유 포함)
 - target_profit_pct: 양수 (예: 5.0 → 매수가 대비 +5% 목표)
 - stop_loss_pct: 양수 (예: 3.0 → 매수가 대비 -3% 손절)
-- picks가 없으면 반드시: {"picks": []}
+- 매수할 종목이 없으면: {"market_summary": "...", "picks": []}
 """
 
 # ------------------------------------------------------------------
@@ -127,12 +132,17 @@ class AITraderService:
     def __init__(self) -> None:
         self._client = AsyncOpenAI(api_key=settings.openai_api_key)
 
+    @staticmethod
+    def _empty_analysis(summary: str) -> dict:
+        """분석 불가 또는 오류 시 반환하는 빈 결과 딕셔너리."""
+        return {"market_summary": summary, "picks": []}
+
     async def analyze_market(
         self,
         market_data: dict[str, dict],
         holding_symbols: set[str],
-    ) -> list[dict]:
-        """MarketDataManager 캐시 데이터를 기반으로 최대 2개 코인을 픽한다.
+    ) -> dict:
+        """MarketDataManager 캐시 데이터를 기반으로 시장을 분석하고 최대 2개 코인을 픽한다.
 
         Args:
             market_data: MarketDataManager.get_all() 반환값.
@@ -141,17 +151,21 @@ class AITraderService:
                              AI 픽에서 이 코인들은 자동 제외된다.
 
         Returns:
-            픽 리스트 (최대 2개):
-            [{"symbol", "reason", "target_profit_pct", "stop_loss_pct"}, ...]
-            분석 불가 또는 픽 없으면 빈 리스트 반환.
+            {
+              "market_summary": str,       # 현재 시장 전반 분석 2~3문장
+              "picks": list[dict],         # 매수 픽 (최대 2개, 관망 시 빈 리스트)
+            }
+            분석 불가(API 오류, 캐시 없음)일 때도 같은 구조의 dict를 반환한다.
         """
         if not market_data:
             logger.warning("AITraderService: 마켓 데이터 없음 — MarketDataManager 캐시 초기화 대기 중")
-            return []
+            return self._empty_analysis(
+                "마켓 데이터 캐시가 아직 초기화되지 않아 분석을 수행하지 못했습니다."
+            )
 
         if not settings.openai_api_key:
             logger.error("AITraderService: OPENAI_API_KEY 미설정")
-            return []
+            return self._empty_analysis("OpenAI API 키가 설정되지 않아 분석을 수행하지 못했습니다.")
 
         # ── 유저 프롬프트 구성 ────────────────────────────────────────
         lines: list[str] = ["# Top 코인 시장 데이터 (4h 봉 기준)\n"]
@@ -179,7 +193,9 @@ class AITraderService:
             )
 
         user_prompt = "\n".join(lines)
-        logger.debug("AITraderService 프롬프트:\n%s", user_prompt)
+
+        # ── [AI DEBUG - INPUT] 디버깅용 입력 로그 ────────────────────
+        logger.info("[AI DEBUG - INPUT] analyze_market 프롬프트:\n%s", user_prompt)
 
         # ── OpenAI 호출 ───────────────────────────────────────────────
         try:
@@ -191,26 +207,29 @@ class AITraderService:
                     {"role": "user",   "content": user_prompt},
                 ],
                 temperature=0.3,   # 보수적 분석을 위해 낮은 temperature
-                max_tokens=512,
+                max_tokens=600,
             )
         except Exception as exc:
             logger.error("AITraderService OpenAI 호출 실패: %s", exc)
-            return []
+            return self._empty_analysis(f"AI 분석 중 오류가 발생했습니다: {exc}")
 
         raw = response.choices[0].message.content or "{}"
-        logger.debug("AITraderService 응답: %s", raw)
+
+        # ── [AI DEBUG - OUTPUT] 디버깅용 원본 응답 로그 ──────────────
+        logger.info("[AI DEBUG - OUTPUT] analyze_market 원본 응답:\n%s", raw)
 
         # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
         try:
             result = json.loads(raw)
         except json.JSONDecodeError as exc:
             logger.error("AITraderService JSON 파싱 실패: %s | raw=%s", exc, raw)
-            return []
+            return self._empty_analysis("AI 응답 파싱에 실패했습니다.")
 
-        picks: list[dict] = result.get("picks", [])
+        market_summary: str = str(result.get("market_summary", "시장 분석 결과를 가져오지 못했습니다."))
+        picks_raw: list[dict] = result.get("picks", [])
 
         validated: list[dict] = []
-        for p in picks:
+        for p in picks_raw:
             if not isinstance(p, dict):
                 continue
             symbol = p.get("symbol", "")
@@ -233,7 +252,7 @@ class AITraderService:
             len(validated),
             [v["symbol"] for v in validated],
         )
-        return validated
+        return {"market_summary": market_summary, "picks": validated}
 
     async def review_positions(
         self,

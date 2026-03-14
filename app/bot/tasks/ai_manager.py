@@ -177,7 +177,7 @@ class AIFundManagerTask(commands.Cog):
         ws_manager = UpbitWebsocketManager.get()
         registry   = WorkerRegistry.get()
 
-        # 현재 감시 중인 running 포지션 목록 (BotSetting, buy_price 있는 것만)
+        # 현재 감시 중인 running 포지션 목록
         running_settings = [s for s in user.bot_settings if s.is_running]
         ai_max_coins     = user.ai_max_coins  # 최대 동시 보유 종목 수
 
@@ -196,35 +196,43 @@ class AIFundManagerTask(commands.Cog):
                 reviewed_positions=reviewed_positions,
             )
 
-        # ── Step 2: 신규 종목 발굴 (슬롯 여유가 있을 때만) ──────────
-        current_count = len(running_settings)
-        slots         = ai_max_coins - current_count
+        # ── Step 2: 시장 분석 (슬롯 유무와 무관하게 항상 실행) ──────
+        # analyze_market은 항상 {"market_summary": str, "picks": list} 를 반환한다.
+        # market_summary는 관망 이유 포함 — 슬롯이 없어도 사용자에게 전달한다.
+        current_count   = len(running_settings)
+        slots           = ai_max_coins - current_count
+        holding_symbols: set[str] = {s.symbol for s in running_settings}
 
-        if slots > 0:
-            holding_symbols: set[str] = {s.symbol for s in running_settings}
+        analysis       = await self.ai_service.analyze_market(market_data, holding_symbols)
+        market_summary = analysis.get("market_summary", "")
+        picks          = analysis.get("picks", [])
+
+        if slots > 0 and picks:
             await self._buy_new_coins(
                 user=user,
-                market_data=market_data,
-                holding_symbols=holding_symbols,
-                slots=slots,
+                picks=picks[:slots],     # 슬롯 수만큼만 전달 (이미 필터링 완료)
                 exchange=exchange,
                 ws_manager=ws_manager,
                 registry=registry,
                 bought_positions=bought_positions,
             )
-        else:
+        elif slots <= 0:
             logger.info(
                 "AI 펀드 매니저: 슬롯 없음 (보유=%d / 최대=%d) — 신규 매수 스킵: user_id=%s",
                 current_count, ai_max_coins, user_id,
             )
+        else:
+            logger.info("AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-        # ── Step 3: 단일 통합 DM Embed 전송 ─────────────────────────
-        if reviewed_positions or bought_positions:
-            embed = self._build_unified_report_embed(
-                reviewed_positions=reviewed_positions,
-                bought_positions=bought_positions,
-            )
-            await self._send_dm_embed(user_id, embed)
+        # ── Step 3: 단일 통합 DM Embed 무조건 전송 ───────────────────
+        # 매수·리뷰 액션이 없어도 AI 시장 분석 요약과 함께 반드시 DM을 발송한다.
+        # 유저가 봇의 동작 여부(고장 vs 관망)를 항상 인지할 수 있어야 한다.
+        embed = self._build_unified_report_embed(
+            market_summary=market_summary,
+            reviewed_positions=reviewed_positions,
+            bought_positions=bought_positions,
+        )
+        await self._send_dm_embed(user_id, embed)
 
     # ------------------------------------------------------------------
     # Step 1: 기존 포지션 리뷰
@@ -342,35 +350,24 @@ class AIFundManagerTask(commands.Cog):
     async def _buy_new_coins(
         self,
         user: User,
-        market_data: dict[str, dict],
-        holding_symbols: set[str],
-        slots: int,
+        picks: list[dict],
         exchange: ExchangeService,
         ws_manager: UpbitWebsocketManager,
         registry: WorkerRegistry,
         bought_positions: list[dict],
     ) -> None:
-        """AI가 선정한 신규 종목을 슬롯 수만큼 시장가 매수하고 워커를 등록한다.
+        """AI가 선정한 신규 종목을 시장가 매수하고 워커를 등록한다.
 
         Args:
             user:             처리 대상 User 인스턴스.
-            market_data:      MarketDataManager.get_all() 결과.
-            holding_symbols:  이미 보유 중인 심볼 집합 (AI 픽 제외용).
-            slots:            구매 가능한 남은 슬롯 수.
+            picks:            _process_user에서 이미 슬롯 수만큼 슬라이싱된 픽 리스트.
+                              (analyze_market 호출은 _process_user 에서 수행)
             exchange:         ExchangeService 인스턴스.
             ws_manager:       UpbitWebsocketManager 인스턴스.
             registry:         WorkerRegistry 인스턴스.
             bought_positions: 결과를 축적할 리스트 (DM 리포트용).
         """
         user_id = user.user_id
-
-        picks = await self.ai_service.analyze_market(market_data, holding_symbols)
-        if not picks:
-            logger.info("AI 신규 픽 없음: user_id=%s", user_id)
-            return
-
-        # 슬롯 수만큼만 매수
-        picks = picks[:slots]
 
         for pick in picks:
             symbol        = pick["symbol"]
@@ -459,24 +456,48 @@ class AIFundManagerTask(commands.Cog):
 
     @staticmethod
     def _build_unified_report_embed(
+        market_summary: str,
         reviewed_positions: list[dict],
         bought_positions: list[dict],
     ) -> discord.Embed:
-        """포지션 리뷰 + 신규 매수 내역을 하나의 Embed로 통합한다.
+        """AI 시장 분석 요약 + 포지션 리뷰 + 신규 매수 내역을 하나의 Embed로 통합한다.
+
+        매수·리뷰 액션이 전혀 없는 '전액 현금 관망' 상태여도 반드시 호출되며,
+        이 경우 market_summary(관망 이유)와 관망 안내 문구만 표시된다.
 
         Args:
+            market_summary:     AI가 생성한 현재 시장 전반 분석 2~3문장.
             reviewed_positions: 리뷰 결과 딕셔너리 리스트.
             bought_positions:   신규 매수 딕셔너리 리스트.
 
         Returns:
             통합 discord.Embed 객체.
         """
-        total = len(reviewed_positions) + len(bought_positions)
+        total    = len(reviewed_positions) + len(bought_positions)
+        is_idle  = total == 0   # 매수·갱신·유지 액션 없음 = 전액 현금 관망
+
+        color    = discord.Color.light_grey() if is_idle else discord.Color.blue()
+        desc     = "전액 현금 관망 중" if is_idle else f"총 **{total}개** 종목을 처리했습니다."
         embed = discord.Embed(
             title="🤖 [AI 펀드 매니저] 4시간 종합 리포트",
-            description=f"총 **{total}개** 종목을 처리했습니다.",
-            color=discord.Color.blue(),
+            description=desc,
+            color=color,
         )
+
+        # ── AI 시장 분석 요약 (항상 첫 번째 Field) ───────────────────
+        embed.add_field(
+            name="📊 AI 시장 분석 요약",
+            value=market_summary or "분석 결과를 가져오지 못했습니다.",
+            inline=False,
+        )
+
+        # ── 전액 현금 관망 안내 ──────────────────────────────────────
+        if is_idle:
+            embed.add_field(
+                name="👀 현재 포지션",
+                value="전액 현금 관망 중 (신규 진입 조건 미달)",
+                inline=False,
+            )
 
         # ── 신규 매수 섹션 ────────────────────────────────────────────
         if bought_positions:
