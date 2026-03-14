@@ -199,12 +199,23 @@ class TradingWorker:
         )
 
     async def _buy(self) -> None:
-        """시장가 매수 실행 후 체결 결과를 DB에 저장한다."""
+        """시장가 매수 실행 후 체결 결과를 DB에 저장한다.
+
+        업비트 시장가 매수 수수료(0.05%) 및 소폭의 슬리피지를 감안해
+        실제 주문 금액은 유저 설정 금액의 99.9%만 사용한다.
+        포지션 기록·수익률 계산 기준은 유저가 의도한 원래 금액(buy_amount_krw)으로 유지한다.
+        """
         current_price = await self._wait_for_ws_price()
-        order = await self.exchange.create_market_buy_order(self.symbol, self.buy_amount_krw)
-        amount_coin = float(order.get("filled", 0)) or (self.buy_amount_krw / current_price)
+
+        # ── 수수료·슬리피지 안전 버퍼 (0.1% 차감) ───────────────────
+        # 업비트는 원화 주문 금액에 소수점을 허용하지 않으므로 int() 처리
+        safe_buy_amount: int = int(self.buy_amount_krw * 0.999)
+
+        order = await self.exchange.create_market_buy_order(self.symbol, safe_buy_amount)
+        amount_coin = float(order.get("filled", 0)) or (safe_buy_amount / current_price)
 
         # 포지션 메모리 기록
+        # buy_amount_krw 는 유저가 설정한 원래 금액을 유지 (수익률 계산 기준 일관성)
         self._position = Position(
             symbol=self.symbol,
             buy_price=current_price,
@@ -222,7 +233,7 @@ class TradingWorker:
             f"✅ **매수 체결** `{self.symbol}`\n"
             f"매수가: {current_price:,.0f} KRW\n"
             f"수량: {amount_coin:.6f}\n"
-            f"투자금액: {self.buy_amount_krw:,.0f} KRW",
+            f"투자금액: {safe_buy_amount:,.0f} KRW (수수료 여유분 0.1% 제외)",
         )
 
     # ------------------------------------------------------------------
