@@ -264,16 +264,31 @@ class MarketDataManager:
                 "symbol":      symbol,
                 "quoteVolume": info.get("quoteVolume") or 0.0,
                 "percentage":  info.get("percentage"),
+                # ccxt upbit ticker 기준: last = 최근 체결가
+                "last_price":  float(info.get("last") or info.get("close") or 0),
             }
             for symbol, info in tickers.items()
             if symbol.endswith("/KRW") and (info.get("quoteVolume") or 0) > 0
         ]
+
+        # ── 엽전주 하드 필터: 현재가 100원 미만 코인은 AI 분석 대상에서 원천 차단 ──
+        # 업비트 API 틱 데이터 기준으로 last_price(최근 체결가)가 100 KRW 미만이면
+        # Top N 후보에서 완전 제외. 프롬프트 데이터 자체에 엽전주가 유입되지 않게 한다.
+        before_filter = len(krw_tickers)
+        krw_tickers = [t for t in krw_tickers if t["last_price"] >= 100]
+        filtered_count = before_filter - len(krw_tickers)
+        if filtered_count > 0:
+            logger.info(
+                "엽전주 필터 적용: %d개 코인 제외 (100원 미만) — 잔여 %d개",
+                filtered_count, len(krw_tickers),
+            )
+
         krw_tickers.sort(key=lambda x: x["quoteVolume"], reverse=True)
         top_symbols = [t["symbol"] for t in krw_tickers[:TOP_N]]
 
         logger.info(
-            "1차 스크리닝 완료: KRW 마켓 %d 개 → Top %d: %s",
-            len(krw_tickers), TOP_N, top_symbols,
+            "1차 스크리닝 완료: KRW 마켓 %d 개 (엽전주 %d개 제외) → Top %d: %s",
+            len(krw_tickers), filtered_count, TOP_N, top_symbols,
         )
 
         ticker_map = {t["symbol"]: t for t in krw_tickers if t["symbol"] in top_symbols}
