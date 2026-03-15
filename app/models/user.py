@@ -79,13 +79,16 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
-    # ── AI 자동 매매 설정 (VIP 전용) ─────────────────────────────────
-    # ai_mode_enabled  : AI 펀드 매니저 활성화 여부 (기본 꺼짐)
-    # ai_trade_amount  : AI가 1회 매수 시 사용할 금액 (KRW, 기본 10,000)
-    # ai_max_coins     : AI가 동시에 보유할 최대 코인 수 (기본 3)
+    # ── AI 자동 매매 설정 ─────────────────────────────────────────────
+    # ai_mode_enabled      : AI 펀드 매니저 활성화 여부 (VIP 전용, 기본 꺼짐)
+    # ai_trade_amount      : AI 1회 매수 금액 (실거래·모의투자 공용, KRW)
+    # ai_max_coins         : 동시 보유 최대 코인 수 (기본 3, 실거래·모의투자 각각 적용)
+    # ai_paper_mode_enabled: AI 모의투자 ON/OFF (등급 무관, 기본 꺼짐)
+    #                        True → 스케줄러가 virtual_krw 잔고로 가상 매매 수행
     ai_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     ai_trade_amount: Mapped[int] = mapped_column(Integer, default=10000)
     ai_max_coins: Mapped[int] = mapped_column(Integer, default=3)
+    ai_paper_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ── 모의투자 가상 잔고 ────────────────────────────────────────────
     # virtual_krw : 모의투자 시 사용하는 가상 원화 잔고 (기본 1,000만 원)

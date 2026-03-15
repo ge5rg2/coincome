@@ -39,6 +39,8 @@ jobs:
             # 2) AI 자동매매 관련 컬럼 마이그레이션 
             docker-compose run --rm app python -m scripts.add_ai_columns
             docker-compose run --rm app python -m scripts.add_ai_max_coins_column
+            docker-compose run --rm app python -m scripts.add_paper_trading
+            docker-compose run --rm app python -m scripts.add_ai_paper_mode_column
 
             # ---------------------------------------------------
 
