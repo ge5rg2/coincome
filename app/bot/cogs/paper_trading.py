@@ -38,61 +38,141 @@ _INITIAL_VIRTUAL_KRW = 10_000_000.0
 
 
 # ------------------------------------------------------------------
-# AI 모의투자 설정 Modal
+# Step 1: 드롭다운 Select 컴포넌트
 # ------------------------------------------------------------------
 
+class PaperModeSelect(discord.ui.Select):
+    """AI 모의투자 모드(ON / OFF) 드롭다운."""
 
-class PaperAISettingModal(discord.ui.Modal, title="🎮 AI 모의투자 설정"):
-    """AI 모의투자 ON/OFF, 1회 가상 매수 금액, 투자 성향을 입력받는 Modal.
+    def __init__(self, current_enabled: bool) -> None:
+        options = [
+            discord.SelectOption(
+                label="✅ ON — AI 모의투자 활성화",
+                value="ON",
+                default=current_enabled,
+            ),
+            discord.SelectOption(
+                label="⏸️ OFF — AI 모의투자 비활성화",
+                value="OFF",
+                default=not current_enabled,
+            ),
+        ]
+        super().__init__(placeholder="AI 모의투자 모드를 선택하세요", options=options, row=0)
 
-    유저가 ON 으로 설정하면 다음 AI 스케줄러 실행 시부터
-    virtual_krw 가상 잔고로 AI가 자동 종목을 선정·매수한다.
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.view.mode_value = self.values[0]
+        await interaction.response.defer()
 
-    Args:
-        user: 현재 DB User 인스턴스 (기존 설정값 pre-fill 용).
+
+class PaperStyleSelect(discord.ui.Select):
+    """투자 성향(SWING / SCALPING) 드롭다운."""
+
+    def __init__(self, current_style: str) -> None:
+        options = [
+            discord.SelectOption(
+                label="📊 SWING — 4h 보수 스윙",
+                value="SWING",
+                description="4시간 봉 RSI·MA 기반 보수적 스윙 매매",
+                default=current_style == "SWING",
+            ),
+            discord.SelectOption(
+                label="⚡ SCALPING — 1h 공격 단타",
+                value="SCALPING",
+                description="1시간 봉 모멘텀 기반 빠른 단타 매매",
+                default=current_style == "SCALPING",
+            ),
+        ]
+        super().__init__(placeholder="투자 성향을 선택하세요", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.view.style_value = self.values[0]
+        await interaction.response.defer()
+
+
+# ------------------------------------------------------------------
+# Step 1: View (드롭다운 + "다음" 버튼)
+# ------------------------------------------------------------------
+
+class PaperAISettingView(discord.ui.View):
+    """1단계: AI 모드·투자 성향을 드롭다운으로 선택하는 View.
+
+    "다음 →" 버튼 클릭 시 선택된 값을 PaperAmountModal(2단계)에 전달한다.
+    timeout=180 초 (이후 버튼 비활성화).
+
+    Attributes:
+        mode_value:  현재 선택된 모드 ("ON" / "OFF").
+        style_value: 현재 선택된 투자 성향 ("SWING" / "SCALPING").
     """
 
     def __init__(self, user: User) -> None:
-        super().__init__()
-        self._user_id = user.user_id
+        super().__init__(timeout=180)
+        self._user = user
+        self.mode_value: str = "ON" if user.ai_paper_mode_enabled else "OFF"
+        self.style_value: str = getattr(user, "ai_trade_style", "SWING")
 
-        self.mode = discord.ui.TextInput(
-            label="AI 모의투자 모드 (ON / OFF)",
-            placeholder="ON 또는 OFF 입력",
-            min_length=2,
-            max_length=3,
-            default="ON" if user.ai_paper_mode_enabled else "OFF",
+        self.add_item(PaperModeSelect(current_enabled=user.ai_paper_mode_enabled))
+        self.add_item(PaperStyleSelect(current_style=self.style_value))
+
+    @discord.ui.button(label="다음 →", style=discord.ButtonStyle.primary, emoji="⚙️", row=2)
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        """선택된 모드·성향을 PaperAmountModal 에 넘겨 Modal 을 표시한다."""
+        modal = PaperAmountModal(
+            user_id=self._user.user_id,
+            mode=self.mode_value,
+            style=self.style_value,
+            current_amount=int(self._user.ai_trade_amount),
+            current_virtual_krw=float(self._user.virtual_krw),
         )
+        await interaction.response.send_modal(modal)
+
+
+# ------------------------------------------------------------------
+# Step 2: Modal (금액 입력 + DB 저장)
+# ------------------------------------------------------------------
+
+class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 설정"):
+    """2단계: 1회 가상 매수 금액을 입력받아 DB에 저장하는 Modal.
+
+    Step 1 View에서 선택된 mode·style 값을 생성자로 받아 함께 저장한다.
+
+    Args:
+        user_id:             Discord 사용자 ID.
+        mode:                "ON" 또는 "OFF" (Step 1 에서 선택).
+        style:               "SWING" 또는 "SCALPING" (Step 1 에서 선택).
+        current_amount:      현재 DB 값 (pre-fill 용).
+        current_virtual_krw: 현재 가상 잔고 (완료 Embed 표시용).
+    """
+
+    def __init__(
+        self,
+        user_id: str,
+        mode: str,
+        style: str,
+        current_amount: int,
+        current_virtual_krw: float,
+    ) -> None:
+        super().__init__()
+        self._user_id = user_id
+        self._mode = mode
+        self._style = style
+        self._virtual_krw = current_virtual_krw
+
         self.trade_amount = discord.ui.TextInput(
             label="1회 가상 매수 금액 (KRW)",
             placeholder="예: 100000  (가상 잔고에서 차감됩니다)",
             min_length=4,
             max_length=10,
-            default=str(user.ai_trade_amount),
+            default=str(current_amount),
         )
-        self.trade_style = discord.ui.TextInput(
-            label="투자 성향 (SWING / SCALPING)",
-            placeholder="SWING = 4h 보수 스윙  |  SCALPING = 1h 공격 단타",
-            min_length=4,
-            max_length=8,
-            default=getattr(user, "ai_trade_style", "SWING"),
-        )
-        self.add_item(self.mode)
         self.add_item(self.trade_amount)
-        self.add_item(self.trade_style)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         """모달 제출 처리: 입력 검증 → DB 업데이트 → 완료 Embed 반환."""
         await interaction.response.defer(ephemeral=True)
 
         # ── 입력값 검증 ───────────────────────────────────────────────
-        mode_str = self.mode.value.strip().upper()
-        if mode_str not in ("ON", "OFF"):
-            await interaction.followup.send(
-                "❌ 모드는 **ON** 또는 **OFF** 만 입력 가능합니다.", ephemeral=True
-            )
-            return
-
         try:
             amount = int(self.trade_amount.value.replace(",", "").strip())
         except ValueError:
@@ -109,18 +189,7 @@ class PaperAISettingModal(discord.ui.Modal, title="🎮 AI 모의투자 설정")
             )
             return
 
-        # 투자 성향 검증
-        style_str = self.trade_style.value.strip().upper()
-        if style_str not in ("SWING", "SCALPING"):
-            await interaction.followup.send(
-                "❌ 투자 성향은 **SWING** 또는 **SCALPING** 만 입력 가능합니다.\n"
-                "• SWING — 4시간 봉 기반 보수적 스윙 매매\n"
-                "• SCALPING — 1시간 봉 기반 공격적 단타 매매",
-                ephemeral=True,
-            )
-            return
-
-        enabled = mode_str == "ON"
+        enabled = self._mode == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -133,18 +202,17 @@ class PaperAISettingModal(discord.ui.Modal, title="🎮 AI 모의투자 설정")
                 return
             user.ai_paper_mode_enabled = enabled
             user.ai_trade_amount = amount
-            user.ai_trade_style = style_str
-            virtual_krw = float(user.virtual_krw)
+            user.ai_trade_style = self._style
             await db.commit()
 
         logger.info(
             "AI 모의투자 설정 업데이트: user_id=%s enabled=%s amount=%d style=%s",
-            self._user_id, enabled, amount, style_str,
+            self._user_id, enabled, amount, self._style,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
         status = "✅ 활성화" if enabled else "⏸️ 비활성화"
-        style_label = "📊 스윙 (4h 봉)" if style_str == "SWING" else "⚡ 단타 (1h 봉)"
+        style_label = "📊 스윙 (4h 봉)" if self._style == "SWING" else "⚡ 단타 (1h 봉)"
         embed = discord.Embed(
             title="🎮 AI 모의투자 설정 완료",
             color=discord.Color.purple() if enabled else discord.Color.greyple(),
@@ -152,12 +220,12 @@ class PaperAISettingModal(discord.ui.Modal, title="🎮 AI 모의투자 설정")
         embed.add_field(name="AI 모의투자", value=status, inline=True)
         embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
         embed.add_field(name="투자 성향", value=style_label, inline=True)
-        embed.add_field(name="💰 현재 가상 잔고", value=f"{virtual_krw:,.0f} KRW", inline=True)
+        embed.add_field(name="💰 현재 가상 잔고", value=f"{self._virtual_krw:,.0f} KRW", inline=True)
 
         if enabled:
-            next_time = get_next_run_time_for_style(style_str)
+            next_time = get_next_run_time_for_style(self._style)
             schedule_desc = (
-                "매시 정각 실행 (1h 봉 기준 단타)" if style_str == "SCALPING"
+                "매시 정각 실행 (1h 봉 기준 단타)" if self._style == "SCALPING"
                 else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
             )
             embed.add_field(
@@ -203,7 +271,10 @@ class PaperTradingCog(commands.Cog):
         description="API 키 없이 AI가 가상 잔고로 자동 매매하는 모의투자 모드를 설정합니다.",
     )
     async def paper_trading_command(self, interaction: discord.Interaction) -> None:
-        """유저 정보를 조회(없으면 자동 생성)한 뒤 PaperAISettingModal 을 띄운다."""
+        """유저 정보를 조회(없으면 자동 생성)한 뒤 드롭다운 선택 View(1단계)를 띄운다.
+
+        [설정 UI] 드롭다운(모드·성향) → "다음 →" 버튼 → Modal(금액) 2단계 흐름.
+        """
         user_id = str(interaction.user.id)
 
         async with AsyncSessionLocal() as db:
@@ -216,8 +287,30 @@ class PaperTradingCog(commands.Cog):
                 await db.commit()
                 await db.refresh(user)
 
-        modal = PaperAISettingModal(user=user)
-        await interaction.response.send_modal(modal)
+        current_style = getattr(user, "ai_trade_style", "SWING")
+        style_label = "⚡ 단타 (1h 봉)" if current_style == "SCALPING" else "📊 스윙 (4h 봉)"
+        embed = discord.Embed(
+            title="🎮 AI 모의투자 설정",
+            description=(
+                "드롭다운에서 **AI 모드**와 **투자 성향**을 선택한 뒤\n"
+                "**⚙️ 다음 →** 버튼을 눌러 매수 금액을 입력하세요."
+            ),
+            color=discord.Color.purple(),
+        )
+        embed.add_field(
+            name="현재 설정",
+            value=(
+                f"AI 모의투자: **{'ON' if user.ai_paper_mode_enabled else 'OFF'}**\n"
+                f"투자 성향: **{style_label}**\n"
+                f"1회 매수: **{int(user.ai_trade_amount):,} KRW** "
+                f"| 가상 잔고: **{float(user.virtual_krw):,.0f} KRW**"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="⏱️ 이 메시지는 3분 후 만료됩니다.")
+
+        view = PaperAISettingView(user=user)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     # ------------------------------------------------------------------
     # /ai모의초기화 — 모의투자 전체 리셋

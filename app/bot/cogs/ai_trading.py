@@ -1,10 +1,16 @@
 """
 /ai실전 슬래시 커맨드: VIP 전용 AI 실전 자동 매매 펀드 매니저 기능 설정.
 
-처리 흐름:
-  1. VIP 등급 검증 → 미달 시 업그레이드 유도 Embed 반환
-  2. VIP 확인 → AISettingModal 표시 (현재 설정값 pre-fill)
-  3. 유저 입력(ON/OFF · 매수금액 · 최대 종목 수) → DB 업데이트 → 완료 Embed 반환
+처리 흐름 (2단계 UI):
+  [Step 1] VIP 등급 검증 → 미달 시 업그레이드 유도 Embed 반환
+  [Step 2] VIP 확인 → AISettingView 표시 (드롭다운: AI모드·투자성향)
+  [Step 3] "다음 →" 버튼 클릭 → AIAmountModal 표시 (숫자 입력: 금액·종목수)
+  [Step 4] 유저 제출 → DB 업데이트 → 완료 Embed 반환
+
+Discord API 제약:
+  Modal 내부에는 TextInput 만 허용 (Select 불가).
+  드롭다운 선택지(ON/OFF, SWING/SCALPING)는 Step 2 View 단계에서 처리하고,
+  선택된 값을 Step 3 Modal 생성자에 전달한다.
 """
 from __future__ import annotations
 
@@ -56,63 +62,148 @@ def _make_vip_required_embed() -> discord.Embed:
 
 
 # ------------------------------------------------------------------
-# AI 설정 Modal
+# Step 1: 드롭다운 Select 컴포넌트
 # ------------------------------------------------------------------
 
-class AISettingModal(discord.ui.Modal, title="AI 실전 자동 매매 설정"):
-    """AI 모드 ON/OFF, 1회 매수 금액, 최대 보유 종목 수, 투자 성향을 입력받는 Modal.
+class ModeSelect(discord.ui.Select):
+    """AI 모드(ON / OFF) 드롭다운."""
 
-    현재 DB 값을 default 로 pre-fill 해 유저가 기존 설정을 바로 확인·수정할 수 있다.
+    def __init__(self, current_enabled: bool) -> None:
+        options = [
+            discord.SelectOption(
+                label="✅ ON — AI 자동매매 활성화",
+                value="ON",
+                default=current_enabled,
+            ),
+            discord.SelectOption(
+                label="⏸️ OFF — AI 자동매매 비활성화",
+                value="OFF",
+                default=not current_enabled,
+            ),
+        ]
+        super().__init__(placeholder="AI 모드를 선택하세요", options=options, row=0)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.view.mode_value = self.values[0]
+        await interaction.response.defer()
+
+
+class StyleSelect(discord.ui.Select):
+    """투자 성향(SWING / SCALPING) 드롭다운."""
+
+    def __init__(self, current_style: str) -> None:
+        options = [
+            discord.SelectOption(
+                label="📊 SWING — 4h 보수 스윙",
+                value="SWING",
+                description="4시간 봉 RSI·MA 기반 보수적 스윙 매매",
+                default=current_style == "SWING",
+            ),
+            discord.SelectOption(
+                label="⚡ SCALPING — 1h 공격 단타",
+                value="SCALPING",
+                description="1시간 봉 모멘텀 기반 빠른 단타 매매",
+                default=current_style == "SCALPING",
+            ),
+        ]
+        super().__init__(placeholder="투자 성향을 선택하세요", options=options, row=1)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.view.style_value = self.values[0]
+        await interaction.response.defer()
+
+
+# ------------------------------------------------------------------
+# Step 1: View (드롭다운 + "다음" 버튼)
+# ------------------------------------------------------------------
+
+class AISettingView(discord.ui.View):
+    """1단계: AI 모드·투자 성향을 드롭다운으로 선택하는 View.
+
+    "다음 →" 버튼 클릭 시 선택된 값을 AIAmountModal(2단계)에 전달한다.
+    timeout=180 초 (이후 버튼 비활성화).
+
+    Attributes:
+        mode_value:  현재 선택된 AI 모드 ("ON" / "OFF").
+        style_value: 현재 선택된 투자 성향 ("SWING" / "SCALPING").
     """
 
     def __init__(self, user: User) -> None:
-        super().__init__()
-        self._user_id = user.user_id
+        super().__init__(timeout=180)
+        self._user = user
+        # Select 콜백이 업데이트할 인스턴스 변수 (초기값 = 기존 DB 설정)
+        self.mode_value: str = "ON" if user.ai_mode_enabled else "OFF"
+        self.style_value: str = getattr(user, "ai_trade_style", "SWING")
 
-        self.mode = discord.ui.TextInput(
-            label="AI 모드 (ON / OFF)",
-            placeholder="ON 또는 OFF 입력",
-            min_length=2,
-            max_length=3,
-            default="ON" if user.ai_mode_enabled else "OFF",
+        self.add_item(ModeSelect(current_enabled=user.ai_mode_enabled))
+        self.add_item(StyleSelect(current_style=self.style_value))
+
+    @discord.ui.button(label="다음 →", style=discord.ButtonStyle.primary, emoji="⚙️", row=2)
+    async def next_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        """선택된 모드·성향을 AIAmountModal 에 넘겨 Modal 을 표시한다."""
+        modal = AIAmountModal(
+            user_id=self._user.user_id,
+            mode=self.mode_value,
+            style=self.style_value,
+            current_amount=int(self._user.ai_trade_amount),
+            current_max_coins=self._user.ai_max_coins,
         )
+        await interaction.response.send_modal(modal)
+
+
+# ------------------------------------------------------------------
+# Step 2: Modal (숫자 입력 + DB 저장)
+# ------------------------------------------------------------------
+
+class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
+    """2단계: 매수 금액과 최대 종목 수를 입력받아 DB에 저장하는 Modal.
+
+    Step 1 View에서 선택된 mode·style 값을 생성자로 받아 함께 저장한다.
+
+    Args:
+        user_id:           Discord 사용자 ID.
+        mode:              "ON" 또는 "OFF" (Step 1 에서 선택).
+        style:             "SWING" 또는 "SCALPING" (Step 1 에서 선택).
+        current_amount:    현재 DB 값 (pre-fill 용).
+        current_max_coins: 현재 DB 값 (pre-fill 용).
+    """
+
+    def __init__(
+        self,
+        user_id: str,
+        mode: str,
+        style: str,
+        current_amount: int,
+        current_max_coins: int,
+    ) -> None:
+        super().__init__()
+        self._user_id = user_id
+        self._mode = mode
+        self._style = style
+
         self.trade_amount = discord.ui.TextInput(
             label="1회 매수 금액 (KRW)",
             placeholder="예: 10000  (최소 6,000)",
             min_length=4,
             max_length=10,
-            default=str(user.ai_trade_amount),
+            default=str(current_amount),
         )
         self.max_coins = discord.ui.TextInput(
             label="최대 동시 보유 종목 수",
             placeholder="예: 3  (1 ~ 10)",
             min_length=1,
             max_length=2,
-            default=str(user.ai_max_coins),
+            default=str(current_max_coins),
         )
-        self.trade_style = discord.ui.TextInput(
-            label="투자 성향 (SWING / SCALPING)",
-            placeholder="SWING = 4h 보수 스윙  |  SCALPING = 1h 공격 단타",
-            min_length=4,
-            max_length=8,
-            default=getattr(user, "ai_trade_style", "SWING"),
-        )
-        self.add_item(self.mode)
         self.add_item(self.trade_amount)
         self.add_item(self.max_coins)
-        self.add_item(self.trade_style)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
 
         # ── 입력값 검증 ───────────────────────────────────────────────
-        mode_str = self.mode.value.strip().upper()
-        if mode_str not in ("ON", "OFF"):
-            await interaction.followup.send(
-                "❌ 모드는 **ON** 또는 **OFF** 만 입력 가능합니다.", ephemeral=True
-            )
-            return
-
         try:
             amount = int(self.trade_amount.value.replace(",", "").strip())
         except ValueError:
@@ -143,18 +234,7 @@ class AISettingModal(discord.ui.Modal, title="AI 실전 자동 매매 설정"):
             )
             return
 
-        # 투자 성향 검증
-        style_str = self.trade_style.value.strip().upper()
-        if style_str not in ("SWING", "SCALPING"):
-            await interaction.followup.send(
-                "❌ 투자 성향은 **SWING** 또는 **SCALPING** 만 입력 가능합니다.\n"
-                "• SWING — 4시간 봉 기반 보수적 스윙 매매\n"
-                "• SCALPING — 1시간 봉 기반 공격적 단타 매매",
-                ephemeral=True,
-            )
-            return
-
-        enabled = mode_str == "ON"
+        enabled = self._mode == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -168,17 +248,17 @@ class AISettingModal(discord.ui.Modal, title="AI 실전 자동 매매 설정"):
             user.ai_mode_enabled = enabled
             user.ai_trade_amount = amount
             user.ai_max_coins = max_coins
-            user.ai_trade_style = style_str
+            user.ai_trade_style = self._style
             await db.commit()
 
         logger.info(
             "AI 실전 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d style=%s",
-            self._user_id, enabled, amount, max_coins, style_str,
+            self._user_id, enabled, amount, max_coins, self._style,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
         status = "✅ 활성화" if enabled else "⏸️ 비활성화"
-        style_label = "📊 스윙 (4h 봉)" if style_str == "SWING" else "⚡ 단타 (1h 봉)"
+        style_label = "📊 스윙 (4h 봉)" if self._style == "SWING" else "⚡ 단타 (1h 봉)"
         embed = discord.Embed(
             title="🤖 AI 실전 자동 매매 설정 완료",
             color=discord.Color.green() if enabled else discord.Color.greyple(),
@@ -189,9 +269,9 @@ class AISettingModal(discord.ui.Modal, title="AI 실전 자동 매매 설정"):
         embed.add_field(name="투자 성향", value=style_label, inline=True)
 
         if enabled:
-            next_time = get_next_run_time_for_style(style_str)
+            next_time = get_next_run_time_for_style(self._style)
             schedule_desc = (
-                "매시 정각 실행 (1h 봉 기준 단타)" if style_str == "SCALPING"
+                "매시 정각 실행 (1h 봉 기준 단타)" if self._style == "SCALPING"
                 else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
             )
             embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | {schedule_desc}")
@@ -216,10 +296,10 @@ class AITradingCog(commands.Cog):
         description="VIP 전용 AI 실전 자동 매매 펀드 매니저를 설정합니다.",
     )
     async def ai_settings_command(self, interaction: discord.Interaction) -> None:
-        """VIP 여부를 확인한 뒤 AI 실전 설정 Modal을 띄운다.
+        """VIP 여부를 확인한 뒤 드롭다운 선택 View(1단계)를 띄운다.
 
         [VIP 검증] FREE / PRO 등급이면 업그레이드 유도 Embed로 즉시 반환.
-        [설정 UI ] VIP 확인 시 현재 설정값이 pre-fill 된 AISettingModal 표시.
+        [설정 UI ] 드롭다운(모드·성향) → "다음 →" 버튼 → Modal(금액·종목수) 2단계 흐름.
         """
         user_id = str(interaction.user.id)
 
@@ -234,6 +314,28 @@ class AITradingCog(commands.Cog):
             )
             return
 
-        # VIP 확인 → 설정 Modal 표시
-        modal = AISettingModal(user=user)
-        await interaction.response.send_modal(modal)
+        # ── 현재 설정값 요약 Embed + View 표시 ───────────────────────
+        current_style = getattr(user, "ai_trade_style", "SWING")
+        style_label = "⚡ 단타 (1h 봉)" if current_style == "SCALPING" else "📊 스윙 (4h 봉)"
+        embed = discord.Embed(
+            title="🤖 AI 실전 자동 매매 설정",
+            description=(
+                "드롭다운에서 **AI 모드**와 **투자 성향**을 선택한 뒤\n"
+                "**⚙️ 다음 →** 버튼을 눌러 매수 금액을 입력하세요."
+            ),
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="현재 설정",
+            value=(
+                f"AI 모드: **{'ON' if user.ai_mode_enabled else 'OFF'}**\n"
+                f"투자 성향: **{style_label}**\n"
+                f"1회 매수: **{int(user.ai_trade_amount):,} KRW** "
+                f"| 최대 종목: **{user.ai_max_coins}개**"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="⏱️ 이 메시지는 3분 후 만료됩니다.")
+
+        view = AISettingView(user=user)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
