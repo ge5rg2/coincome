@@ -198,6 +198,9 @@ class TradingWorker:
         if setting is None:
             raise RuntimeError(f"BotSetting 레코드 없음: id={self.setting_id}")
 
+        # 🛡️ 강력한 방어 코드: 인스턴스 생성 시 누락되었을 수 있는 paper_trading 플래그를 DB 기준으로 강제 동기화
+        self.is_paper_trading = setting.is_paper_trading
+
         if setting.buy_price is not None and setting.amount_coin is not None:
             # ── 상태 복구 경로 ──────────────────────────────────────
             self._position = Position(
@@ -213,14 +216,21 @@ class TradingWorker:
                 self.setting_id, self.symbol,
                 setting.buy_price, setting.amount_coin,
             )
-            mode_tag = "🎮 [모의투자] " if self.is_paper_trading else ""
-            await self.notify(
-                self.user_id,
-                f"🔄 **{mode_tag}포지션 복구** `{self.symbol}`\n"
-                f"매수가: {format_krw_price(float(setting.buy_price))} KRW  |  "
-                f"수량: {float(setting.amount_coin):.6f}\n"
-                f"매도 감시를 재개합니다.",
-            )
+            if setting.is_ai_managed:
+                # AI 관리 봇은 신규 진입 직후 복구 알림이 불필요 — 콘솔 로그만 남김
+                logger.info(
+                    "[AI] 포지션 복구 (알림 생략): setting_id=%s symbol=%s",
+                    self.setting_id, self.symbol,
+                )
+            else:
+                mode_tag = "🎮 [모의투자] " if self.is_paper_trading else ""
+                await self.notify(
+                    self.user_id,
+                    f"🔄 **{mode_tag}포지션 복구** `{self.symbol}`\n"
+                    f"매수가: {format_krw_price(float(setting.buy_price))} KRW  |  "
+                    f"수량: {float(setting.amount_coin):.6f}\n"
+                    f"매도 감시를 재개합니다.",
+                )
         else:
             # ── 신규 진입 경로 ──────────────────────────────────────
             await self._buy()
