@@ -311,6 +311,7 @@ class AIFundManagerTask(commands.Cog):
                 ws_manager=ws_manager,
                 registry=registry,
                 bought_positions=real_bought,
+                market_data=market_data,
                 is_paper_mode=False,
             )
         elif is_real_active and real_slots <= 0:
@@ -330,6 +331,7 @@ class AIFundManagerTask(commands.Cog):
                 ws_manager=ws_manager,
                 registry=registry,
                 bought_positions=paper_bought,
+                market_data=market_data,
                 is_paper_mode=True,
             )
         elif is_paper_active and paper_slots <= 0:
@@ -475,6 +477,7 @@ class AIFundManagerTask(commands.Cog):
         ws_manager: UpbitWebsocketManager,
         registry: WorkerRegistry,
         bought_positions: list[dict],
+        market_data: dict[str, dict],
         is_paper_mode: bool = False,
     ) -> None:
         """AI가 선정한 신규 종목을 매수(실거래) 또는 가상 체결(모의투자)하고 워커를 등록한다.
@@ -495,6 +498,7 @@ class AIFundManagerTask(commands.Cog):
             ws_manager:       UpbitWebsocketManager 인스턴스.
             registry:         WorkerRegistry 인스턴스.
             bought_positions: 결과를 축적할 리스트 (DM 리포트용).
+            market_data:      MarketDataManager.get_all() 결과 — WS 캐시 미스 시 Fallback 가격 제공.
             is_paper_mode:    True = 모의투자 / False = 실거래.
         """
         user_id      = user.user_id
