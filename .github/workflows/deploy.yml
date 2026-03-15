@@ -42,6 +42,7 @@ jobs:
             docker-compose run --rm app python -m scripts.add_paper_trading
             docker-compose run --rm app python -m scripts.add_ai_paper_mode_column
             docker-compose run --rm app python -m scripts.add_ai_renewal_columns
+            docker-compose run --rm app python -m scripts.add_ai_trade_style_column
 
             # ---------------------------------------------------
 

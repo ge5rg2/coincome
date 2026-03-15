@@ -90,6 +90,13 @@ class User(Base):
     ai_max_coins: Mapped[int] = mapped_column(Integer, default=3)
     ai_paper_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # ── AI 투자 성향 ──────────────────────────────────────────────────
+    # SWING    : 4시간 봉 기반 보수적 스윙 매매 (기본값)
+    #            → 01·05·09·13·17·21시 KST 에만 실행
+    # SCALPING : 1시간 봉 기반 공격적 단타/모멘텀 매매
+    #            → 매시 정각 실행 (더 잦은 진입/청산)
+    ai_trade_style: Mapped[str] = mapped_column(String(20), default="SWING")
+
     # ── 모의투자 가상 잔고 ────────────────────────────────────────────
     # virtual_krw : 모의투자 시 사용하는 가상 원화 잔고 (기본 1,000만 원)
     #               매수 시 차감, 매도 시 체결 대금 합산.

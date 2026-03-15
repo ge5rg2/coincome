@@ -42,6 +42,12 @@ stop_loss_pct 부호 규칙:
   Position.stop_price = buy_price * (1 - stop_loss_pct / 100) 로 계산됨.
   AI 응답도 양수로 반환하도록 프롬프트에 명시하고,
   파싱 시 abs() 로 한 번 더 보정함.
+
+trade_style 분기:
+  SWING    — 4시간 봉 RSI·MA 기반 보수적 스윙 매매 (기본값)
+             지표: rsi14, ma20 | temperature=0.3
+  SCALPING — 1시간 봉 RSI·MA 기반 공격적 모멘텀 단타
+             지표: rsi14_1h, ma20_1h | temperature=0.5
 """
 from __future__ import annotations
 
@@ -55,15 +61,21 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# 시스템 프롬프트
+# 시스템 프롬프트 — SWING (4시간 봉, 보수적 스윙)
 # ------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """\
+_SWING_SYSTEM_PROMPT = """\
 너는 10년 차 엘리트 크립토 퀀트 트레이더야.
 
-제공된 Top 10 코인의 4시간 봉 RSI·MA 지표를 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
+제공된 Top 코인의 4시간 봉 RSI·MA 지표를 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
 이미 유저가 보유 중인 코인은 반드시 제외해.
 보수적으로 접근하고, 매수할 만한 종목이 없으면 picks를 빈 배열로 반환해.
+
+전략 기준:
+- RSI14가 30~50 구간에서 반등 조짐이 보이거나 MA20 지지 확인 시 매수 검토
+- 목표 익절: +3% ~ +7% (매수가 대비)
+- 손절 기준: -2% ~ -4% (매수가 대비)
+- 거래대금이 극히 적거나 추세 불명확하면 관망
 
 반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
 {
@@ -86,13 +98,50 @@ _SYSTEM_PROMPT = """\
 """
 
 # ------------------------------------------------------------------
-# 포지션 리뷰용 시스템 프롬프트
+# 시스템 프롬프트 — SCALPING (1시간 봉, 공격적 모멘텀 단타)
+# ------------------------------------------------------------------
+
+_SCALPING_SYSTEM_PROMPT = """\
+너는 고빈도 1시간 봉 단타 트레이더야.
+
+제공된 Top 코인의 1시간 봉 RSI·MA 지표와 24h 거래대금을 분석해서 지금 당장 모멘텀 돌파 진입하기 좋은 코인을 최대 2개만 골라.
+이미 유저가 보유 중인 코인은 반드시 제외해.
+
+전략 기준:
+- RSI14(1h)가 55~70 구간에서 상승 모멘텀이 강하고 거래대금이 급증하면 돌파 매수 검토
+- RSI가 60 이상이더라도 거래대금이 폭발적으로 몰리며 추세를 탄다면 진입 가능
+- 목표 익절: +1.5% ~ +2.0% (매수가 대비, 빠른 단타)
+- 손절 기준: -1.5% (매수가 대비, 엄격한 리스크 관리)
+- 모멘텀이 불명확하거나 거래대금이 충분하지 않으면 관망
+
+반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
+{
+  "market_summary": "현재 전체 시장 상황에 대한 분석 및 판단 근거를 2~3문장으로 요약. 모멘텀 진입 이유 또는 관망 이유를 명확히 서술.",
+  "picks": [
+    {
+      "symbol":            "ETH/KRW",
+      "reason":            "1h RSI 62, 거래대금 급증하며 MA20 돌파 확인 — 모멘텀 진입",
+      "target_profit_pct": 1.8,
+      "stop_loss_pct":     1.5
+    }
+  ]
+}
+
+규칙:
+- market_summary는 관망을 선택했더라도 반드시 작성
+- target_profit_pct: 양수 (예: 1.8 → 매수가 대비 +1.8% 목표)
+- stop_loss_pct: 양수 (예: 1.5 → 매수가 대비 -1.5% 손절)
+- 매수할 종목이 없으면: {"market_summary": "...", "picks": []}
+"""
+
+# ------------------------------------------------------------------
+# 포지션 리뷰용 시스템 프롬프트 (SWING·SCALPING 공용)
 # ------------------------------------------------------------------
 
 _REVIEW_SYSTEM_PROMPT = """\
 너는 현재 보유 중인 코인의 포지션을 관리하는 AI야.
 
-각 코인의 매수가·현재가·수익률·현재 익절/손절 기준과 최신 4시간 봉 RSI·MA 지표를 함께 보고,
+각 코인의 매수가·현재가·수익률·현재 익절/손절 기준과 최신 RSI·MA 지표를 함께 보고,
 기존 설정을 유지할지(MAINTAIN) 아니면 현재 추세에 맞춰 변경할지(UPDATE) 결정해.
 
 반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
@@ -141,14 +190,17 @@ class AITraderService:
         self,
         market_data: dict[str, dict],
         holding_symbols: set[str],
+        trade_style: str = "SWING",
     ) -> dict:
         """MarketDataManager 캐시 데이터를 기반으로 시장을 분석하고 최대 2개 코인을 픽한다.
 
         Args:
             market_data: MarketDataManager.get_all() 반환값.
-                         키: 심볼(BTC/KRW), 값: price·rsi14·ma20·change_pct 등.
+                         키: 심볼(BTC/KRW), 값: price·rsi14·ma20·rsi14_1h·ma20_1h 등.
             holding_symbols: 유저가 현재 감시 중인(is_running=True) 코인 심볼 집합.
                              AI 픽에서 이 코인들은 자동 제외된다.
+            trade_style: "SWING" (4h 보수 스윙) 또는 "SCALPING" (1h 공격 단타).
+                         지표 키 및 system 프롬프트·temperature 가 분기된다.
 
         Returns:
             {
@@ -167,14 +219,26 @@ class AITraderService:
             logger.error("AITraderService: OPENAI_API_KEY 미설정")
             return self._empty_analysis("OpenAI API 키가 설정되지 않아 분석을 수행하지 못했습니다.")
 
+        # ── trade_style 분기 설정 ─────────────────────────────────────
+        is_scalping = trade_style == "SCALPING"
+        system_prompt = _SCALPING_SYSTEM_PROMPT if is_scalping else _SWING_SYSTEM_PROMPT
+        temperature   = 0.5 if is_scalping else 0.3
+        timeframe_label = "1h 봉 기준" if is_scalping else "4h 봉 기준"
+
         # ── 유저 프롬프트 구성 ────────────────────────────────────────
-        lines: list[str] = ["# Top 코인 시장 데이터 (4h 봉 기준)\n"]
+        lines: list[str] = [f"# Top 코인 시장 데이터 ({timeframe_label})\n"]
         for symbol, data in market_data.items():
-            price    = data.get("price")
-            rsi14    = data.get("rsi14")
-            ma20     = data.get("ma20")
-            chg      = data.get("change_pct")
-            vol      = data.get("volume_krw")
+            price = data.get("price")
+            chg   = data.get("change_pct")
+            vol   = data.get("volume_krw")
+
+            # SCALPING: 1h 지표 / SWING: 4h 지표
+            if is_scalping:
+                rsi14 = data.get("rsi14_1h")
+                ma20  = data.get("ma20_1h")
+            else:
+                rsi14 = data.get("rsi14")
+                ma20  = data.get("ma20")
 
             price_str = f"{price:,.0f} KRW" if price is not None else "N/A"
             rsi_str   = f"{rsi14:.1f}"      if rsi14  is not None else "N/A"
@@ -195,7 +259,10 @@ class AITraderService:
         user_prompt = "\n".join(lines)
 
         # ── [AI DEBUG - INPUT] 디버깅용 입력 로그 ────────────────────
-        logger.info("[AI DEBUG - INPUT] analyze_market 프롬프트:\n%s", user_prompt)
+        logger.info(
+            "[AI DEBUG - INPUT] analyze_market 프롬프트 (style=%s):\n%s",
+            trade_style, user_prompt,
+        )
 
         # ── OpenAI 호출 ───────────────────────────────────────────────
         try:
@@ -203,10 +270,10 @@ class AITraderService:
                 model="gpt-4o-mini",
                 response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user",   "content": user_prompt},
                 ],
-                temperature=0.3,   # 보수적 분석을 위해 낮은 temperature
+                temperature=temperature,
                 max_tokens=600,
             )
         except Exception as exc:
@@ -216,7 +283,10 @@ class AITraderService:
         raw = response.choices[0].message.content or "{}"
 
         # ── [AI DEBUG - OUTPUT] 디버깅용 원본 응답 로그 ──────────────
-        logger.info("[AI DEBUG - OUTPUT] analyze_market 원본 응답:\n%s", raw)
+        logger.info(
+            "[AI DEBUG - OUTPUT] analyze_market 원본 응답 (style=%s):\n%s",
+            trade_style, raw,
+        )
 
         # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
         try:
@@ -248,7 +318,8 @@ class AITraderService:
                 break
 
         logger.info(
-            "AITraderService 분석 완료: %d 개 픽 %s",
+            "AITraderService 분석 완료 (style=%s): %d 개 픽 %s",
+            trade_style,
             len(validated),
             [v["symbol"] for v in validated],
         )
@@ -258,10 +329,11 @@ class AITraderService:
         self,
         positions_data: list[dict],
         market_data: dict[str, dict],
+        trade_style: str = "SWING",
     ) -> list[dict]:
         """현재 보유 포지션의 익절/손절 기준을 AI가 재검토한다.
 
-        각 포지션의 수익률과 최신 4h 봉 RSI·MA 지표를 함께 AI에 전달해
+        각 포지션의 수익률과 최신 RSI·MA 지표를 함께 AI에 전달해
         기존 설정 유지(MAINTAIN) 또는 갱신(UPDATE) 여부를 결정한다.
 
         Args:
@@ -275,6 +347,8 @@ class AITraderService:
                                 "stop_loss_pct":     float,
                             }
             market_data: MarketDataManager.get_all() 반환값 (RSI·MA 지표 포함).
+            trade_style: "SWING" 또는 "SCALPING".
+                         SCALPING이면 1h 지표(rsi14_1h, ma20_1h)를 참조한다.
 
         Returns:
             리뷰 리스트:
@@ -288,20 +362,28 @@ class AITraderService:
             logger.error("AITraderService: OPENAI_API_KEY 미설정")
             return []
 
-        # ── 유저 프롬프트 구성 ────────────────────────────────────────
-        lines: list[str] = ["# 현재 보유 포지션\n"]
-        for pos in positions_data:
-            symbol       = pos["symbol"]
-            buy_price    = pos["buy_price"]
-            cur_price    = pos["current_price"]
-            profit_pct   = pos["profit_pct"]
-            tgt          = pos["target_profit_pct"]
-            sl           = pos["stop_loss_pct"]
+        is_scalping = trade_style == "SCALPING"
 
-            # 최신 차트 지표 보강
-            mdata   = market_data.get(symbol, {})
-            rsi14   = mdata.get("rsi14")
-            ma20    = mdata.get("ma20")
+        # ── 유저 프롬프트 구성 ────────────────────────────────────────
+        timeframe_label = "1h 봉 기준" if is_scalping else "4h 봉 기준"
+        lines: list[str] = [f"# 현재 보유 포지션 ({timeframe_label})\n"]
+        for pos in positions_data:
+            symbol     = pos["symbol"]
+            buy_price  = pos["buy_price"]
+            cur_price  = pos["current_price"]
+            profit_pct = pos["profit_pct"]
+            tgt        = pos["target_profit_pct"]
+            sl         = pos["stop_loss_pct"]
+
+            # SCALPING: 1h 지표 / SWING: 4h 지표
+            mdata = market_data.get(symbol, {})
+            if is_scalping:
+                rsi14 = mdata.get("rsi14_1h")
+                ma20  = mdata.get("ma20_1h")
+            else:
+                rsi14 = mdata.get("rsi14")
+                ma20  = mdata.get("ma20")
+
             rsi_str = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
             ma_str  = f"{ma20:,.0f}" if ma20  is not None else "N/A"
 
@@ -378,8 +460,9 @@ class AITraderService:
             )
 
         logger.info(
-            "AITraderService(review) 완료: %d 개 포지션 검토 "
+            "AITraderService(review) 완료 (style=%s): %d 개 포지션 검토 "
             "(UPDATE=%d, MAINTAIN=%d)",
+            trade_style,
             len(validated),
             sum(1 for v in validated if v["action"] == "UPDATE"),
             sum(1 for v in validated if v["action"] == "MAINTAIN"),

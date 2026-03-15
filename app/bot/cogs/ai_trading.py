@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.user import SubscriptionTier, User
-from app.utils.time import get_next_ai_run_time
+from app.utils.time import get_next_run_time_for_style
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +59,8 @@ def _make_vip_required_embed() -> discord.Embed:
 # AI 설정 Modal
 # ------------------------------------------------------------------
 
-class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
-    """AI 모드 ON/OFF, 1회 매수 금액, 최대 보유 종목 수를 입력받는 Modal.
+class AISettingModal(discord.ui.Modal, title="AI 실전 자동 매매 설정"):
+    """AI 모드 ON/OFF, 1회 매수 금액, 최대 보유 종목 수, 투자 성향을 입력받는 Modal.
 
     현재 DB 값을 default 로 pre-fill 해 유저가 기존 설정을 바로 확인·수정할 수 있다.
     """
@@ -90,9 +90,17 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
             max_length=2,
             default=str(user.ai_max_coins),
         )
+        self.trade_style = discord.ui.TextInput(
+            label="투자 성향 (SWING / SCALPING)",
+            placeholder="SWING = 4h 보수 스윙  |  SCALPING = 1h 공격 단타",
+            min_length=4,
+            max_length=8,
+            default=getattr(user, "ai_trade_style", "SWING"),
+        )
         self.add_item(self.mode)
         self.add_item(self.trade_amount)
         self.add_item(self.max_coins)
+        self.add_item(self.trade_style)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -135,6 +143,17 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
             )
             return
 
+        # 투자 성향 검증
+        style_str = self.trade_style.value.strip().upper()
+        if style_str not in ("SWING", "SCALPING"):
+            await interaction.followup.send(
+                "❌ 투자 성향은 **SWING** 또는 **SCALPING** 만 입력 가능합니다.\n"
+                "• SWING — 4시간 봉 기반 보수적 스윙 매매\n"
+                "• SCALPING — 1시간 봉 기반 공격적 단타 매매",
+                ephemeral=True,
+            )
+            return
+
         enabled = mode_str == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
@@ -149,28 +168,33 @@ class AISettingModal(discord.ui.Modal, title="AI 자동 매매 설정"):
             user.ai_mode_enabled = enabled
             user.ai_trade_amount = amount
             user.ai_max_coins = max_coins
+            user.ai_trade_style = style_str
             await db.commit()
 
         logger.info(
-            "AI 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d",
-            self._user_id, enabled, amount, max_coins,
+            "AI 실전 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d style=%s",
+            self._user_id, enabled, amount, max_coins, style_str,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
         status = "✅ 활성화" if enabled else "⏸️ 비활성화"
+        style_label = "📊 스윙 (4h 봉)" if style_str == "SWING" else "⚡ 단타 (1h 봉)"
         embed = discord.Embed(
-            title="🤖 AI 자동 매매 설정 완료",
+            title="🤖 AI 실전 자동 매매 설정 완료",
             color=discord.Color.green() if enabled else discord.Color.greyple(),
         )
         embed.add_field(name="AI 모드", value=status, inline=True)
         embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
         embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
+        embed.add_field(name="투자 성향", value=style_label, inline=True)
 
         if enabled:
-            next_time = get_next_ai_run_time()
-            embed.set_footer(
-                text=f"⏳ 다음 AI 분석 예정: {next_time} (이후 4시간 간격)"
+            next_time = get_next_run_time_for_style(style_str)
+            schedule_desc = (
+                "매시 정각 실행 (1h 봉 기준 단타)" if style_str == "SCALPING"
+                else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
             )
+            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | {schedule_desc}")
         else:
             embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
 
