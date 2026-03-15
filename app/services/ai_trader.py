@@ -60,6 +60,30 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_pct(value: object, *, default: float) -> float:
+    """AI 응답의 수익/손절률 값을 안전하게 float 로 변환한다.
+
+    AI가 '%' 기호, '+'/'-' 부호, 공백을 붙여 반환하는 경우를 방어한다.
+    예: "+5.0%", "5.0 %", "-3.0" → abs(float) 로 정규화.
+
+    Args:
+        value:   AI JSON 응답에서 가져온 원시 값 (str·int·float 혼용 가능).
+        default: 변환 불가 시 사용할 기본값.
+
+    Returns:
+        항상 양수 float 반환.
+    """
+    try:
+        cleaned = str(value).replace("%", "").replace("+", "").strip()
+        return abs(float(cleaned))
+    except (ValueError, TypeError):
+        logger.warning(
+            "AITraderService: pct 값 파싱 실패 %r → 기본값 %.1f 사용", value, default
+        )
+        return default
+
+
 # ------------------------------------------------------------------
 # 시스템 프롬프트 — SWING (4시간 봉, 보수적 스윙)
 # ------------------------------------------------------------------
@@ -96,6 +120,17 @@ _SWING_SYSTEM_PROMPT = """\
 - stop_loss_pct: 양수, 반드시 2.0 ~ 4.0 범위 내 값만 사용
 - [절대 규칙 1 - 언행일치] market_summary에서 '지지선 확인', '추세 전환', '진입 적합' 등 긍정 평가한 종목이 있다면 핑계 대지 말고 무조건(MUST) picks 배열에 매수 데이터로 포함해야 한다. 분석만 하고 매수하지 않는 것은 시스템 오류다.
 - [절대 규칙 2 - 관망의 조건] picks 배열을 []로 비울 것이라면, market_summary에도 "모든 코인이 과매수이거나 추세가 깨져서 전액 현금 관망한다"라고 철저히 부정적으로만 적어야 한다. 좋다고 해놓고 안 사는 것은 허용하지 않는다.
+- [절대 규칙 3 - symbol 형식] symbol은 반드시 "코인명/KRW" 형태로 작성하라. (예: BTC/KRW, ETH/KRW) "BTC", "KRW-BTC" 등 다른 형식은 시스템 오류를 일으킨다.
+- [절대 규칙 4 - 숫자 형식] target_profit_pct와 stop_loss_pct는 % 기호나 +/- 부호 없이 순수 숫자만 적어라. (예: 5.0 ← 올바름 / "+5.0%" ← 오류)
+
+[올바른 응답 예시 — 이 형식을 반드시 따를 것]
+{
+  "market_summary": "BTC가 4시간 봉 기준 20MA 지지를 받고 있으며, ETH 또한 반등 국면에 있어 스윙 진입에 매우 적합합니다. 두 종목을 매수합니다.",
+  "picks": [
+    {"symbol": "BTC/KRW", "reason": "4h 20MA 지지 및 거래대금 안정적", "target_profit_pct": 5.0, "stop_loss_pct": 3.0},
+    {"symbol": "ETH/KRW", "reason": "RSI 과매도 구간 탈출 및 반등 추세 확인", "target_profit_pct": 6.0, "stop_loss_pct": 2.5}
+  ]
+}
 """
 
 # ------------------------------------------------------------------
@@ -306,16 +341,32 @@ class AITraderService:
         for p in picks_raw:
             if not isinstance(p, dict):
                 continue
-            symbol = p.get("symbol", "")
-            if not symbol or symbol in holding_symbols:
+
+            symbol = str(p.get("symbol", "")).strip()
+
+            # symbol 형식 방어: 반드시 "XXX/KRW" 형태여야 한다.
+            # AI가 "BTC", "KRW-BTC", "btc/krw" 등 잘못된 형식을 반환하는 경우 보정 시도.
+            if "/" not in symbol:
+                # 슬래시 없음 → "/KRW" 붙여서 복구 시도 (예: "BTC" → "BTC/KRW")
+                symbol = f"{symbol.upper()}/KRW"
+            else:
+                # 대소문자 정규화
+                base, quote = symbol.split("/", 1)
+                symbol = f"{base.upper()}/{quote.upper()}"
+
+            if not symbol.endswith("/KRW"):
+                logger.warning("AITraderService: 비KRW 마켓 심볼 무시: %s", symbol)
                 continue
+            if symbol in holding_symbols:
+                continue
+
             validated.append(
                 {
-                    "symbol":            symbol,
-                    "reason":            str(p.get("reason", "")),
-                    # 양수 강제 (AI가 음수로 반환하는 경우 방어)
-                    "target_profit_pct": abs(float(p.get("target_profit_pct", 3.0))),
-                    "stop_loss_pct":     abs(float(p.get("stop_loss_pct",     2.0))),
+                    "symbol": symbol,
+                    "reason": str(p.get("reason", "")),
+                    # '%' · '+' 기호 및 음수 방어 (_safe_pct 공통 헬퍼 사용)
+                    "target_profit_pct": _safe_pct(p.get("target_profit_pct", 3.0), default=3.0),
+                    "stop_loss_pct":     _safe_pct(p.get("stop_loss_pct",     2.0), default=2.0),
                 }
             )
             if len(validated) == 2:

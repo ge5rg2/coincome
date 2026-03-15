@@ -510,9 +510,23 @@ class AIFundManagerTask(commands.Cog):
 
             try:
                 current_price = ws_manager.get_price(symbol)
+
+                # ── Fallback: WS 캐시 미스 시 market_data 가격 사용 ──────
+                # AI가 픽한 신규 심볼은 웹소켓 구독이 아직 없을 수 있다.
+                # MarketDataManager가 분석에 사용한 캐시 가격으로 대체해 매수를 보호한다.
+                if current_price is None and symbol in market_data:
+                    current_price = market_data[symbol].get("price")
+                    if current_price is not None:
+                        logger.info(
+                            "현재가 WS 캐시 미스 → market_data Fallback 적용: "
+                            "user_id=%s symbol=%s price=%.0f",
+                            user_id, symbol, current_price,
+                        )
+
                 if current_price is None:
                     logger.warning(
-                        "현재가 캐시 없음, 매수 스킵: user_id=%s symbol=%s",
+                        "현재가 없음 (WS + market_data 모두 미스), 매수 스킵: "
+                        "user_id=%s symbol=%s",
                         user_id, symbol,
                     )
                     continue
