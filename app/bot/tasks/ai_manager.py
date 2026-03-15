@@ -292,12 +292,97 @@ class AIFundManagerTask(commands.Cog):
                 trade_style=trade_style,
             )
 
+        # ── 연착륙 분기: 종료 모드 시 신규 매수 없이 리뷰만 완료 ──────
+        # ai_is_shutting_down=True 이면 analyze_market + _buy_new_coins 를 완전히 스킵.
+        # 포지션 리뷰만 실행하고, 실전 AI 포지션이 0개가 되면 ai_mode_enabled 자동 비활성화.
+        is_shutting_down: bool = bool(getattr(user, "ai_is_shutting_down", False))
+        if is_shutting_down:
+            embed = self._build_unified_report_embed(
+                market_summary=(
+                    "🟡 **연착륙 진행 중** — 신규 매수를 중단했습니다.\n"
+                    "보유 포지션이 모두 청산되면 AI가 자동 종료됩니다."
+                ),
+                real_reviewed=real_reviewed,
+                real_bought=[],
+                paper_reviewed=paper_reviewed,
+                paper_bought=[],
+                is_real_active=is_real_active,
+                is_paper_active=is_paper_active,
+                trade_style=trade_style,
+                ai_max_coins=user.ai_max_coins,
+                real_position_count=len(real_running),
+                paper_position_count=len(paper_running),
+            )
+            await self._send_dm_embed(user_id, embed)
+
+            # 실전 AI 포지션이 전부 청산되었는지 DB로 재확인 후 자동 비활성화
+            if is_real_active:
+                async with AsyncSessionLocal() as db:
+                    remaining_result = await db.execute(
+                        select(BotSetting).where(
+                            BotSetting.user_id == user_id,
+                            BotSetting.is_running.is_(True),
+                            BotSetting.is_ai_managed.is_(True),
+                            BotSetting.is_paper_trading.is_(False),
+                        )
+                    )
+                    remaining = remaining_result.scalars().all()
+
+                if not remaining:
+                    async with AsyncSessionLocal() as db:
+                        db_result = await db.execute(
+                            select(User).where(User.user_id == user_id)
+                        )
+                        db_user = db_result.scalar_one_or_none()
+                        if db_user:
+                            db_user.ai_mode_enabled = False
+                            db_user.ai_is_shutting_down = False
+                            await db.commit()
+
+                    logger.info("AI 연착륙 종료 완료 (포지션 전부 청산): user_id=%s", user_id)
+                    completion_embed = discord.Embed(
+                        title="🎉 AI 펀드 매니저 운용 완전 종료",
+                        description=(
+                            "모든 AI 포지션이 청산되어 **AI 운용이 완전히 종료**되었습니다.\n"
+                            "다시 시작하려면 `/ai실전` 에서 AI 모드를 ON으로 설정하세요."
+                        ),
+                        color=discord.Color.green(),
+                    )
+                    await self._send_dm_embed(user_id, completion_embed)
+            return
+
         # ── Step 3: 시장 분석 1회 (실전·모의 공유) ───────────────────
         real_slots  = (user.ai_max_coins - len(real_running))  if is_real_active  else 0
         paper_slots = (user.ai_max_coins - len(paper_running)) if is_paper_active else 0
 
-        # 이번 사이클 가용 예산 계산 (analyze_market 프롬프트 컨텍스트 + 비중 매수 기준)
-        real_available_krw  = float(user.ai_trade_amount) * max(real_slots, 0) if is_real_active  else 0.0
+        # ── 실전 가용 예산 계산 (업비트 잔고 + AI 예산 한도 연동) ──────
+        # ai_budget_krw > 0  → 예산 모드: min(실제 KRW 잔고, 예산 - 기투자금액)
+        # ai_budget_krw == 0 → 기존 방식: 1회 매수 금액 × 빈 슬롯 수 (하위 호환)
+        if is_real_active and real_slots > 0 and exchange is not None:
+            budget = float(getattr(user, "ai_budget_krw", 0))
+            if budget > 0:
+                try:
+                    actual_krw = await exchange.fetch_krw_balance()
+                except Exception as exc:
+                    logger.warning(
+                        "KRW 잔고 조회 실패, 실전 매수 스킵: user_id=%s err=%s", user_id, exc
+                    )
+                    actual_krw = 0.0
+                total_invested = sum(float(s.buy_amount_krw) for s in real_running)
+                budget_remaining = max(0.0, budget - total_invested)
+                real_available_krw = min(actual_krw, budget_remaining)
+                logger.info(
+                    "AI 예산 계산: user_id=%s budget=%.0f invested=%.0f "
+                    "remaining=%.0f krw=%.0f → available=%.0f",
+                    user_id, budget, total_invested,
+                    budget_remaining, actual_krw, real_available_krw,
+                )
+            else:
+                # 예산 미설정: 기존 방식 (1회 매수 금액 × 빈 슬롯)
+                real_available_krw = float(user.ai_trade_amount) * real_slots
+        else:
+            real_available_krw = 0.0
+
         paper_available_krw = float(user.virtual_krw)                          if is_paper_active else 0.0
         ai_context_krw      = max(real_available_krw, paper_available_krw)
 
@@ -675,11 +760,28 @@ class AIFundManagerTask(commands.Cog):
 
                 else:
                     # ── 실거래: 업비트 시장가 매수 API 호출 ───────────
-                    order       = await exchange.create_market_buy_order(symbol, trade_amount)
-                    amount_coin = float(order.get("filled") or 0) or (
-                        trade_amount / current_price
-                    )
-                    buy_price   = float(order.get("average") or current_price)
+                    order      = await exchange.create_market_buy_order(symbol, trade_amount)
+                    filled_qty = float(order.get("filled") or 0)
+                    order_cost = float(order.get("cost") or 0)
+
+                    # 체결 수량: API 응답 우선, 없으면 현재가 기준 추정
+                    amount_coin = filled_qty if filled_qty > 0 else (trade_amount / current_price)
+
+                    # 평균 체결가 산출 (정확도 우선순위):
+                    #  1) cost ÷ filled  — 실제 체결 데이터 기준 가장 정확
+                    #  2) order["average"] — ccxt 정규화 필드 (업비트 즉시 응답에 없을 수 있음)
+                    #  3) WS 현재가 — API 응답에 체결 정보가 없는 예외 상황 fallback
+                    if filled_qty > 0 and order_cost > 0:
+                        buy_price = order_cost / filled_qty
+                    elif order.get("average"):
+                        buy_price = float(order["average"])
+                    else:
+                        buy_price = current_price
+                        logger.warning(
+                            "실전 매수: 체결가 미확인 (WS 현재가로 대체): "
+                            "user_id=%s symbol=%s price=%s",
+                            user_id, symbol, current_price,
+                        )
 
                 # ── BotSetting DB 삽입 (실거래·모의투자 공통) ──────────
                 # is_ai_managed=True 로 수동 봇 포지션과 격리.
