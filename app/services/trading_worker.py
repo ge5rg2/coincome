@@ -112,6 +112,44 @@ class TradingWorker:
             self._task.cancel()
         logger.info("워커 태스크 취소: user=%s symbol=%s", self.user_id, self.symbol)
 
+    async def force_sell(self, reason: str = "🤖 AI 강제 청산") -> bool:
+        """AI 리뷰에 의한 강제 시장가 청산을 수행한다.
+
+        _review_existing_positions 에서 action=SELL 판정 시 외부에서 직접 호출한다.
+        내부 _sell() 메서드를 트리거하므로 DB 초기화·TradeHistory INSERT·
+        가상 잔고 복원·DM 알림이 일반 익절/손절과 동일한 흐름으로 처리된다.
+
+        Args:
+            reason: 매도 사유 문자열 (DM 알림 및 로그에 포함됨).
+
+        Returns:
+            True  = 청산 성공
+            False = 포지션 없거나 현재가 없어 청산 불가
+        """
+        if self._position is None:
+            logger.warning(
+                "force_sell: 포지션 없음 (이미 청산됨): setting_id=%s", self.setting_id
+            )
+            return False
+
+        current_price = UpbitWebsocketManager.get().get_price(self.symbol)
+        if current_price is None:
+            logger.warning(
+                "force_sell: 현재가 없음 (강제 청산 스킵): setting_id=%s symbol=%s",
+                self.setting_id, self.symbol,
+            )
+            return False
+
+        profit_pct = (
+            (current_price - self._position.buy_price) / self._position.buy_price * 100
+        )
+        logger.info(
+            "AI 강제 청산 트리거: setting_id=%s symbol=%s profit_pct=%.2f%% reason=%s",
+            self.setting_id, self.symbol, profit_pct, reason,
+        )
+        await self._sell(current_price, profit_pct, reason)
+        return True
+
     @property
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()

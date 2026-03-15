@@ -117,12 +117,35 @@ class PaperAISettingView(discord.ui.View):
     async def next_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        """선택된 모드·성향을 PaperAmountModal 에 넘겨 Modal 을 표시한다."""
+        """OFF 선택 시 즉시 DB 저장 후 종료. ON 선택 시 PaperAmountModal 표시."""
+        # ── OFF 선택: 모달 없이 즉시 DB 저장 + 완료 메시지 ─────────
+        if self.mode_value == "OFF":
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(User).where(User.user_id == self._user.user_id)
+                )
+                user = result.scalar_one_or_none()
+                if user:
+                    user.ai_paper_mode_enabled = False
+                    await db.commit()
+            logger.info("AI 모의투자 비활성화: user_id=%s", self._user.user_id)
+            embed = discord.Embed(
+                title="⏸️ AI 모의투자 종료",
+                description=(
+                    "AI 모의투자가 **비활성화**되었습니다.\n"
+                    "현재 진행 중인 모의 포지션은 익절/손절 도달까지 계속 감시됩니다."
+                ),
+                color=discord.Color.greyple(),
+            )
+            embed.set_footer(text="다시 켜려면 /ai모의 를 실행하세요.")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # ── ON 선택: 최대 종목 수 설정 모달 표시 ────────────────────
         modal = PaperAmountModal(
             user_id=self._user.user_id,
-            mode=self.mode_value,
             style=self.style_value,
-            current_amount=int(self._user.ai_trade_amount),
+            current_max_coins=self._user.ai_max_coins,
             current_virtual_krw=float(self._user.virtual_krw),
         )
         await interaction.response.send_modal(modal)
@@ -132,64 +155,59 @@ class PaperAISettingView(discord.ui.View):
 # Step 2: Modal (금액 입력 + DB 저장)
 # ------------------------------------------------------------------
 
-class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 설정"):
-    """2단계: 1회 가상 매수 금액을 입력받아 DB에 저장하는 Modal.
+class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 종목 수 설정"):
+    """2단계: 최대 동시 보유 종목 수를 입력받아 DB에 저장하는 Modal.
 
-    Step 1 View에서 선택된 mode·style 값을 생성자로 받아 함께 저장한다.
+    Step 1 View에서 선택된 style 값을 생성자로 받아 함께 저장한다.
+    매수 금액은 AI가 ``virtual_krw × weight_pct / 100`` 으로 자동 산정하므로
+    별도 입력이 불필요하다.
 
     Args:
         user_id:             Discord 사용자 ID.
-        mode:                "ON" 또는 "OFF" (Step 1 에서 선택).
         style:               "SWING" 또는 "SCALPING" (Step 1 에서 선택).
-        current_amount:      현재 DB 값 (pre-fill 용).
+        current_max_coins:   현재 최대 동시 보유 종목 수 DB 값 (pre-fill 용).
         current_virtual_krw: 현재 가상 잔고 (완료 Embed 표시용).
     """
 
     def __init__(
         self,
         user_id: str,
-        mode: str,
         style: str,
-        current_amount: int,
+        current_max_coins: int,
         current_virtual_krw: float,
     ) -> None:
         super().__init__()
         self._user_id = user_id
-        self._mode = mode
         self._style = style
         self._virtual_krw = current_virtual_krw
 
-        self.trade_amount = discord.ui.TextInput(
-            label="1회 가상 매수 금액 (KRW)",
-            placeholder="예: 100000  (가상 잔고에서 차감됩니다)",
-            min_length=4,
-            max_length=10,
-            default=str(current_amount),
+        self.max_coins = discord.ui.TextInput(
+            label="최대 동시 보유 종목 수",
+            placeholder="예: 3  (1 ~ 10)",
+            min_length=1,
+            max_length=2,
+            default=str(current_max_coins),
         )
-        self.add_item(self.trade_amount)
+        self.add_item(self.max_coins)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        """모달 제출 처리: 입력 검증 → DB 업데이트 → 완료 Embed 반환."""
+        """모달 제출 처리: 종목 수 검증 → DB 업데이트 → 완료 Embed 반환."""
         await interaction.response.defer(ephemeral=True)
 
         # ── 입력값 검증 ───────────────────────────────────────────────
         try:
-            amount = int(self.trade_amount.value.replace(",", "").strip())
+            max_coins = int(self.max_coins.value.strip())
         except ValueError:
             await interaction.followup.send(
-                "❌ 매수 금액은 숫자로 입력해 주세요.", ephemeral=True
+                "❌ 최대 보유 종목 수는 숫자로 입력해 주세요.", ephemeral=True
             )
             return
 
-        if amount < 6_000:
+        if not 1 <= max_coins <= 10:
             await interaction.followup.send(
-                "❌ 매수 금액은 **최소 6,000 KRW** 이상이어야 합니다.\n"
-                "(업비트 최소 주문 한도 5,000원 + 손절 하락분 고려)",
-                ephemeral=True,
+                "❌ 최대 보유 종목 수는 **1 ~ 10** 사이로 입력해 주세요.", ephemeral=True
             )
             return
-
-        enabled = self._mode == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
         async with AsyncSessionLocal() as db:
@@ -200,54 +218,42 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
                     "❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True
                 )
                 return
-            user.ai_paper_mode_enabled = enabled
-            user.ai_trade_amount = amount
+            user.ai_paper_mode_enabled = True
+            user.ai_max_coins = max_coins
             user.ai_trade_style = self._style
             await db.commit()
 
         logger.info(
-            "AI 모의투자 설정 업데이트: user_id=%s enabled=%s amount=%d style=%s",
-            self._user_id, enabled, amount, self._style,
+            "AI 모의투자 설정 업데이트: user_id=%s enabled=True max_coins=%d style=%s",
+            self._user_id, max_coins, self._style,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
-        status = "✅ 활성화" if enabled else "⏸️ 비활성화"
         style_label = "📊 스윙 (4h 봉)" if self._style == "SWING" else "⚡ 단타 (1h 봉)"
         embed = discord.Embed(
             title="🎮 AI 모의투자 설정 완료",
-            color=discord.Color.purple() if enabled else discord.Color.greyple(),
+            color=discord.Color.purple(),
         )
-        embed.add_field(name="AI 모의투자", value=status, inline=True)
-        embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
+        embed.add_field(name="AI 모의투자", value="✅ 활성화", inline=True)
+        embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
         embed.add_field(name="투자 성향", value=style_label, inline=True)
         embed.add_field(name="💰 현재 가상 잔고", value=f"{self._virtual_krw:,.0f} KRW", inline=True)
-
-        if enabled:
-            next_time = get_next_run_time_for_style(self._style)
-            schedule_desc = (
-                "매시 정각 실행 (1h 봉 기준 단타)" if self._style == "SCALPING"
-                else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
-            )
-            embed.add_field(
-                name="📌 안내",
-                value=(
-                    "다음 AI 스케줄러 실행 시 **가상 잔고**로 종목을 선택하고 자동 매수합니다.\n"
-                    "실제 업비트 API 키는 필요하지 않습니다.\n"
-                    "매매 성과는 `/ai통계`에서 확인하세요."
-                ),
-                inline=False,
-            )
-            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | {schedule_desc}")
-        else:
-            embed.add_field(
-                name="📌 안내",
-                value=(
-                    "AI 모의투자가 중지되었습니다.\n"
-                    "현재 진행 중인 모의 포지션은 계속 감시됩니다."
-                ),
-                inline=False,
-            )
-
+        embed.add_field(
+            name="📌 안내",
+            value=(
+                "다음 AI 스케줄러 실행 시 **가상 잔고**로 종목을 선택하고 자동 매수합니다.\n"
+                "매수 금액은 AI가 종목별 **매력도·비중에 따라 자동 산정**합니다.\n"
+                "실제 업비트 API 키는 필요하지 않습니다.\n"
+                "매매 성과는 `/ai통계`에서 확인하세요."
+            ),
+            inline=False,
+        )
+        next_time = get_next_run_time_for_style(self._style)
+        schedule_desc = (
+            "매시 정각 실행 (1h 봉 기준 단타)" if self._style == "SCALPING"
+            else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
+        )
+        embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | {schedule_desc}")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -293,7 +299,8 @@ class PaperTradingCog(commands.Cog):
             title="🎮 AI 모의투자 설정",
             description=(
                 "드롭다운에서 **AI 모드**와 **투자 성향**을 선택한 뒤\n"
-                "**⚙️ 다음 →** 버튼을 눌러 매수 금액을 입력하세요."
+                "**⚙️ 다음 →** 버튼을 눌러 최대 보유 종목 수를 입력하세요.\n"
+                "매수 금액은 AI가 종목별 매력도·비중에 따라 **자동 산정**합니다."
             ),
             color=discord.Color.purple(),
         )
@@ -302,7 +309,7 @@ class PaperTradingCog(commands.Cog):
             value=(
                 f"AI 모의투자: **{'ON' if user.ai_paper_mode_enabled else 'OFF'}**\n"
                 f"투자 성향: **{style_label}**\n"
-                f"1회 매수: **{int(user.ai_trade_amount):,} KRW** "
+                f"최대 종목: **{user.ai_max_coins}개** "
                 f"| 가상 잔고: **{float(user.virtual_krw):,.0f} KRW**"
             ),
             inline=False,
