@@ -21,4 +21,10 @@ class BotSetting(Base):
     buy_price: Mapped[float | None] = mapped_column(Float, nullable=True)   # 매수 단가 (KRW)
     amount_coin: Mapped[float | None] = mapped_column(Float, nullable=True) # 보유 코인 수량
 
+    # ── 모의투자 모드 플래그 ──────────────────────────────────────────
+    # True  = 실제 업비트 API 호출 없이 가상 잔고로 매매 시뮬레이션.
+    # False = 실거래 모드 (기본값).
+    # /모의투자 커맨드로 생성된 설정은 항상 True.
+    is_paper_trading: Mapped[bool] = mapped_column(Boolean, default=False)
+
     user: Mapped["User"] = relationship("User", back_populates="bot_settings")

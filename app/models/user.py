@@ -2,7 +2,7 @@ import logging
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import Boolean, DateTime, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import TypeDecorator
 
@@ -87,8 +87,16 @@ class User(Base):
     ai_trade_amount: Mapped[int] = mapped_column(Integer, default=10000)
     ai_max_coins: Mapped[int] = mapped_column(Integer, default=3)
 
+    # ── 모의투자 가상 잔고 ────────────────────────────────────────────
+    # virtual_krw : 모의투자 시 사용하는 가상 원화 잔고 (기본 1,000만 원)
+    #               매수 시 차감, 매도 시 체결 대금 합산.
+    virtual_krw: Mapped[float] = mapped_column(Float, default=10_000_000.0)
+
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")
+    trade_histories: Mapped[list["TradeHistory"]] = relationship(
+        "TradeHistory", back_populates="user"
+    )
 
     @property
     def is_pro(self) -> bool:

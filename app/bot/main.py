@@ -24,6 +24,7 @@ class CoinComeBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         from app.bot.cogs.ai_trading import AITradingCog
+        from app.bot.cogs.paper_trading import PaperTradingCog
         from app.bot.cogs.report import ReportCog
         from app.bot.cogs.settings import SettingsCog
         from app.bot.cogs.subscription import SubscriptionCog
@@ -33,6 +34,7 @@ class CoinComeBot(commands.Bot):
         await self.add_cog(SubscriptionCog(self))
         await self.add_cog(ReportCog(self))
         await self.add_cog(AITradingCog(self))
+        await self.add_cog(PaperTradingCog(self))
         await self.add_cog(AIFundManagerTask(self))
 
         if settings.discord_guild_id:
