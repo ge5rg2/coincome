@@ -1,10 +1,10 @@
 """
-/ai설정 슬래시 커맨드: VIP 전용 AI 자동 매매 펀드 매니저 기능 설정.
+/ai실전 슬래시 커맨드: VIP 전용 AI 실전 자동 매매 펀드 매니저 기능 설정.
 
 처리 흐름:
   1. VIP 등급 검증 → 미달 시 업그레이드 유도 Embed 반환
   2. VIP 확인 → AISettingModal 표시 (현재 설정값 pre-fill)
-  3. 유저 입력(ON/OFF · 매수금액) → DB 업데이트 → 완료 Embed 반환
+  3. 유저 입력(ON/OFF · 매수금액 · 최대 종목 수) → DB 업데이트 → 완료 Embed 반환
 """
 from __future__ import annotations
 
@@ -188,11 +188,11 @@ class AITradingCog(commands.Cog):
         self.bot = bot
 
     @app_commands.command(
-        name="ai설정",
-        description="AI 자동 매매 펀드 매니저를 설정합니다 (VIP 전용).",
+        name="ai실전",
+        description="VIP 전용 AI 실전 자동 매매 펀드 매니저를 설정합니다.",
     )
     async def ai_settings_command(self, interaction: discord.Interaction) -> None:
-        """VIP 여부를 확인한 뒤 AI 설정 Modal을 띄운다.
+        """VIP 여부를 확인한 뒤 AI 실전 설정 Modal을 띄운다.
 
         [VIP 검증] FREE / PRO 등급이면 업그레이드 유도 Embed로 즉시 반환.
         [설정 UI ] VIP 확인 시 현재 설정값이 pre-fill 된 AISettingModal 표시.

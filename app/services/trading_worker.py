@@ -496,15 +496,35 @@ class TradingWorker:
         # → or 연산으로 None 폴백 처리
         sell_price = float(order.get("average") or current_price)
         realized_pnl = (sell_price - pos.buy_price) * sell_amount
+        actual_profit_pct = (sell_price - pos.buy_price) / pos.buy_price * 100
 
         # ── DB 초기화 (is_running=False, buy_price/amount_coin=NULL) ──
         await self._clear_position_from_db()
+
+        # ── 실전 거래 이력 INSERT (/ai통계 실전 성과 집계에 활용) ──────
+        async with AsyncSessionLocal() as db:
+            history = TradeHistory(
+                user_id=self.user_id,
+                symbol=self.symbol,
+                buy_price=pos.buy_price,
+                sell_price=sell_price,
+                profit_pct=actual_profit_pct,
+                profit_krw=realized_pnl,
+                buy_amount_krw=pos.buy_amount_krw,
+                is_paper_trading=False,
+            )
+            db.add(history)
+            await db.commit()
+            logger.info(
+                "[실거래] 거래 이력 저장: user=%s symbol=%s profit_pct=%.2f%% profit_krw=%.0f",
+                self.user_id, self.symbol, actual_profit_pct, realized_pnl,
+            )
 
         await self.notify(
             self.user_id,
             f"{'🟢' if realized_pnl >= 0 else '🔴'} **매도 체결** `{self.symbol}` — {reason}\n"
             f"매수가: {pos.buy_price:,.0f} KRW  →  매도가: {sell_price:,.0f} KRW\n"
-            f"수익률: **{profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
+            f"수익률: **{actual_profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
         )
         self._position = None
         self.stop()
@@ -598,3 +618,26 @@ class WorkerRegistry:
             w.stop()
             self._workers.pop(w.setting_id, None)
         await UpbitWebsocketManager.get().subscribe(self.active_symbols())
+
+    async def stop_paper_for_user(self, user_id: str) -> None:
+        """특정 유저의 모의투자(is_paper_trading=True) 워커 태스크만 취소한다.
+
+        DB 조작(BotSetting·TradeHistory 삭제, virtual_krw 초기화)은
+        호출 측(/ai모의초기화 커맨드)에서 별도로 처리하므로,
+        이 메서드는 인메모리 태스크 취소와 레지스트리 정리만 담당한다.
+
+        Args:
+            user_id: Discord 사용자 ID.
+        """
+        to_stop = [
+            w for w in self._workers.values()
+            if w.user_id == user_id and w.is_paper_trading
+        ]
+        for w in to_stop:
+            w.stop()  # asyncio 태스크 취소만 (DB 건드리지 않음)
+            self._workers.pop(w.setting_id, None)
+        if to_stop:
+            logger.info(
+                "모의투자 워커 %d개 취소 완료: user_id=%s", len(to_stop), user_id
+            )
+            await UpbitWebsocketManager.get().subscribe(self.active_symbols())
