@@ -1,0 +1,59 @@
+"""
+TradeHistory 모델 — 매매 종료(매도) 결과 이력 테이블.
+
+모의투자(is_paper_trading=True)와 실거래(False) 모두 기록하며,
+/AI통계 커맨드의 조회 기반 데이터로 사용된다.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
+
+
+class TradeHistory(Base):
+    """매도 체결 시 생성되는 매매 이력 레코드.
+
+    Attributes:
+        id: 자동 증가 PK.
+        user_id: Discord 사용자 ID (users.user_id FK).
+        symbol: 거래 심볼 (예: BTC/KRW).
+        buy_price: 매수 체결 단가 (KRW). 모의투자는 슬리피지 0.1% 반영 가격.
+        sell_price: 매도 체결 단가 (KRW). 모의투자는 웹소켓 현재가 기준.
+        profit_pct: 수익률 (%). 양수 = 익절, 음수 = 손절.
+        profit_krw: 수익금 (KRW). (sell_price - buy_price) × amount_coin.
+        buy_amount_krw: 매수 시 투자 원금 (KRW). 유저 설정 금액 기준.
+        is_paper_trading: True = 모의투자 기록 / False = 실거래 기록.
+        created_at: 매도 체결 시각 (UTC, DB 서버 타임스탬프).
+    """
+
+    __tablename__ = "trade_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("users.user_id"),
+        nullable=False,
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+
+    buy_price: Mapped[float] = mapped_column(Float, nullable=False)   # 매수 단가 (KRW)
+    sell_price: Mapped[float] = mapped_column(Float, nullable=False)  # 매도 단가 (KRW)
+    profit_pct: Mapped[float] = mapped_column(Float, nullable=False)  # 수익률 (%)
+    profit_krw: Mapped[float] = mapped_column(Float, nullable=False)  # 수익금 (KRW)
+    buy_amount_krw: Mapped[float] = mapped_column(Float, nullable=False)  # 투자 원금 (KRW)
+
+    is_paper_trading: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="trade_histories")

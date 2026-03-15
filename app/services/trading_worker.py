@@ -22,6 +22,8 @@ from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
+from app.models.trade_history import TradeHistory
+from app.models.user import User
 from app.services.exchange import ExchangeService
 from app.services.websocket import UpbitWebsocketManager
 
@@ -73,8 +75,9 @@ class TradingWorker:
         buy_amount_krw: float,
         target_profit_pct: float | None,
         stop_loss_pct: float | None,
-        exchange: ExchangeService,
+        exchange: ExchangeService | None,
         notify_callback,  # async def callback(user_id: str, msg: str)
+        is_paper_trading: bool = False,
     ) -> None:
         self.setting_id = setting_id
         self.user_id = user_id
@@ -84,6 +87,7 @@ class TradingWorker:
         self.stop_loss_pct = stop_loss_pct
         self.exchange = exchange
         self.notify = notify_callback
+        self.is_paper_trading = is_paper_trading  # True = 가상 매매, False = 실거래
 
         self._task: asyncio.Task | None = None
         self._position: Position | None = None
@@ -170,9 +174,10 @@ class TradingWorker:
                 self.setting_id, self.symbol,
                 setting.buy_price, setting.amount_coin,
             )
+            mode_tag = "🎮 [모의투자] " if self.is_paper_trading else ""
             await self.notify(
                 self.user_id,
-                f"🔄 **포지션 복구** `{self.symbol}`\n"
+                f"🔄 **{mode_tag}포지션 복구** `{self.symbol}`\n"
                 f"매수가: {float(setting.buy_price):,.0f} KRW  |  "
                 f"수량: {float(setting.amount_coin):.6f}\n"
                 f"매도 감시를 재개합니다.",
@@ -204,6 +209,9 @@ class TradingWorker:
         업비트 시장가 매수 수수료(0.05%) 및 소폭의 슬리피지를 감안해
         실제 주문 금액은 유저 설정 금액의 99.9%만 사용한다.
         포지션 기록·수익률 계산 기준은 유저가 의도한 원래 금액(buy_amount_krw)으로 유지한다.
+
+        모의투자(is_paper_trading=True) 시에는 업비트 API를 호출하지 않고
+        슬리피지 0.1%가 반영된 가상 체결가로 포지션을 기록한다.
         """
         current_price = await self._wait_for_ws_price()
 
@@ -211,6 +219,48 @@ class TradingWorker:
         # 업비트는 원화 주문 금액에 소수점을 허용하지 않으므로 int() 처리
         safe_buy_amount: int = int(self.buy_amount_krw * 0.999)
 
+        # ════════════════════════════════════════════════════════════
+        # 🎮 모의투자 분기 — 실제 API 호출 없이 가상 체결 처리
+        # ════════════════════════════════════════════════════════════
+        if self.is_paper_trading:
+            # 시장가 매수 슬리피지 0.1% 반영한 가상 체결가
+            fill_price = current_price * 1.001
+            amount_coin = safe_buy_amount / fill_price
+
+            # 가상 잔고 차감
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(User).where(User.user_id == self.user_id))
+                user = result.scalar_one_or_none()
+                if user is not None:
+                    user.virtual_krw = float(user.virtual_krw) - safe_buy_amount
+                    await db.commit()
+                    logger.info(
+                        "[모의투자] 가상 잔고 차감: user=%s amount=%d remaining=%.0f",
+                        self.user_id, safe_buy_amount, user.virtual_krw,
+                    )
+
+            # 포지션 메모리 기록 (슬리피지 반영된 fill_price 기준)
+            self._position = Position(
+                symbol=self.symbol,
+                buy_price=fill_price,
+                amount_coin=amount_coin,
+                buy_amount_krw=self.buy_amount_krw,
+                target_profit_pct=self.target_profit_pct,
+                stop_loss_pct=self.stop_loss_pct,
+            )
+            await self._save_position_to_db(fill_price, amount_coin)
+
+            await self.notify(
+                self.user_id,
+                f"🎮 **[모의투자] 매수 체결** `{self.symbol}`\n"
+                f"매수가: {fill_price:,.0f} KRW (슬리피지 0.1% 반영)\n"
+                f"수량: {amount_coin:.6f}\n"
+                f"투자금액: {safe_buy_amount:,.0f} KRW",
+            )
+            return
+        # ════════════════════════════════════════════════════════════
+
+        # ── 실거래: 업비트 시장가 매수 API 호출 ──────────────────────
         order = await self.exchange.create_market_buy_order(self.symbol, safe_buy_amount)
         amount_coin = float(order.get("filled", 0)) or (safe_buy_amount / current_price)
 
@@ -344,6 +394,60 @@ class TradingWorker:
         if pos is None:
             return
 
+        # ════════════════════════════════════════════════════════════
+        # 🎮 모의투자 분기 — 실제 API 호출 없이 가상 체결 처리
+        # ════════════════════════════════════════════════════════════
+        if self.is_paper_trading:
+            # 현재 웹소켓 가격을 가상 매도 체결가로 사용
+            sell_price = current_price
+            sell_amount = pos.amount_coin
+            proceeds = sell_price * sell_amount                    # 매도 총 수령액 (KRW)
+            realized_pnl = (sell_price - pos.buy_price) * sell_amount  # 순수익 (KRW)
+
+            # 가상 잔고 복원 (체결 대금 전액 합산)
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(User).where(User.user_id == self.user_id))
+                user = result.scalar_one_or_none()
+                if user is not None:
+                    user.virtual_krw = float(user.virtual_krw) + proceeds
+                    await db.commit()
+                    logger.info(
+                        "[모의투자] 가상 잔고 복원: user=%s proceeds=%.0f balance=%.0f",
+                        self.user_id, proceeds, user.virtual_krw,
+                    )
+
+            # 거래 이력 INSERT
+            async with AsyncSessionLocal() as db:
+                history = TradeHistory(
+                    user_id=self.user_id,
+                    symbol=self.symbol,
+                    buy_price=pos.buy_price,
+                    sell_price=sell_price,
+                    profit_pct=profit_pct,
+                    profit_krw=realized_pnl,
+                    buy_amount_krw=pos.buy_amount_krw,
+                    is_paper_trading=True,
+                )
+                db.add(history)
+                await db.commit()
+                logger.info(
+                    "[모의투자] 거래 이력 저장: user=%s symbol=%s profit_pct=%.2f%% profit_krw=%.0f",
+                    self.user_id, self.symbol, profit_pct, realized_pnl,
+                )
+
+            await self._clear_position_from_db()
+            await self.notify(
+                self.user_id,
+                f"{'🟢' if realized_pnl >= 0 else '🔴'} **[🎮 모의투자] 매도 체결** "
+                f"`{self.symbol}` — {reason}\n"
+                f"매수가: {pos.buy_price:,.0f} KRW  →  매도가: {sell_price:,.0f} KRW\n"
+                f"수익률: **{profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
+            )
+            self._position = None
+            self.stop()
+            return
+        # ════════════════════════════════════════════════════════════
+
         # ── 1. 실제 가용 잔고 조회 ─────────────────────────────────────
         try:
             actual_balance = await self.exchange.fetch_coin_balance(self.symbol)
@@ -392,15 +496,35 @@ class TradingWorker:
         # → or 연산으로 None 폴백 처리
         sell_price = float(order.get("average") or current_price)
         realized_pnl = (sell_price - pos.buy_price) * sell_amount
+        actual_profit_pct = (sell_price - pos.buy_price) / pos.buy_price * 100
 
         # ── DB 초기화 (is_running=False, buy_price/amount_coin=NULL) ──
         await self._clear_position_from_db()
+
+        # ── 실전 거래 이력 INSERT (/ai통계 실전 성과 집계에 활용) ──────
+        async with AsyncSessionLocal() as db:
+            history = TradeHistory(
+                user_id=self.user_id,
+                symbol=self.symbol,
+                buy_price=pos.buy_price,
+                sell_price=sell_price,
+                profit_pct=actual_profit_pct,
+                profit_krw=realized_pnl,
+                buy_amount_krw=pos.buy_amount_krw,
+                is_paper_trading=False,
+            )
+            db.add(history)
+            await db.commit()
+            logger.info(
+                "[실거래] 거래 이력 저장: user=%s symbol=%s profit_pct=%.2f%% profit_krw=%.0f",
+                self.user_id, self.symbol, actual_profit_pct, realized_pnl,
+            )
 
         await self.notify(
             self.user_id,
             f"{'🟢' if realized_pnl >= 0 else '🔴'} **매도 체결** `{self.symbol}` — {reason}\n"
             f"매수가: {pos.buy_price:,.0f} KRW  →  매도가: {sell_price:,.0f} KRW\n"
-            f"수익률: **{profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
+            f"수익률: **{actual_profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
         )
         self._position = None
         self.stop()
@@ -494,3 +618,26 @@ class WorkerRegistry:
             w.stop()
             self._workers.pop(w.setting_id, None)
         await UpbitWebsocketManager.get().subscribe(self.active_symbols())
+
+    async def stop_paper_for_user(self, user_id: str) -> None:
+        """특정 유저의 모의투자(is_paper_trading=True) 워커 태스크만 취소한다.
+
+        DB 조작(BotSetting·TradeHistory 삭제, virtual_krw 초기화)은
+        호출 측(/ai모의초기화 커맨드)에서 별도로 처리하므로,
+        이 메서드는 인메모리 태스크 취소와 레지스트리 정리만 담당한다.
+
+        Args:
+            user_id: Discord 사용자 ID.
+        """
+        to_stop = [
+            w for w in self._workers.values()
+            if w.user_id == user_id and w.is_paper_trading
+        ]
+        for w in to_stop:
+            w.stop()  # asyncio 태스크 취소만 (DB 건드리지 않음)
+            self._workers.pop(w.setting_id, None)
+        if to_stop:
+            logger.info(
+                "모의투자 워커 %d개 취소 완료: user_id=%s", len(to_stop), user_id
+            )
+            await UpbitWebsocketManager.get().subscribe(self.active_symbols())
