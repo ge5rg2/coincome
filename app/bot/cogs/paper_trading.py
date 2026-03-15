@@ -124,6 +124,7 @@ class PaperAISettingView(discord.ui.View):
             style=self.style_value,
             current_amount=int(self._user.ai_trade_amount),
             current_virtual_krw=float(self._user.virtual_krw),
+            current_max_coins=self._user.ai_max_coins,
         )
         await interaction.response.send_modal(modal)
 
@@ -133,7 +134,7 @@ class PaperAISettingView(discord.ui.View):
 # ------------------------------------------------------------------
 
 class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 설정"):
-    """2단계: 1회 가상 매수 금액을 입력받아 DB에 저장하는 Modal.
+    """2단계: 1회 가상 매수 금액과 최대 종목 수를 입력받아 DB에 저장하는 Modal.
 
     Step 1 View에서 선택된 mode·style 값을 생성자로 받아 함께 저장한다.
 
@@ -143,6 +144,7 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
         style:               "SWING" 또는 "SCALPING" (Step 1 에서 선택).
         current_amount:      현재 DB 값 (pre-fill 용).
         current_virtual_krw: 현재 가상 잔고 (완료 Embed 표시용).
+        current_max_coins:   현재 최대 동시 보유 종목 수 DB 값 (pre-fill 용).
     """
 
     def __init__(
@@ -152,6 +154,7 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
         style: str,
         current_amount: int,
         current_virtual_krw: float,
+        current_max_coins: int,
     ) -> None:
         super().__init__()
         self._user_id = user_id
@@ -166,7 +169,15 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
             max_length=10,
             default=str(current_amount),
         )
+        self.max_coins = discord.ui.TextInput(
+            label="최대 동시 보유 종목 수",
+            placeholder="예: 3  (1 ~ 10)",
+            min_length=1,
+            max_length=2,
+            default=str(current_max_coins),
+        )
         self.add_item(self.trade_amount)
+        self.add_item(self.max_coins)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         """모달 제출 처리: 입력 검증 → DB 업데이트 → 완료 Embed 반환."""
@@ -189,6 +200,20 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
             )
             return
 
+        try:
+            max_coins = int(self.max_coins.value.strip())
+        except ValueError:
+            await interaction.followup.send(
+                "❌ 최대 보유 종목 수는 숫자로 입력해 주세요.", ephemeral=True
+            )
+            return
+
+        if not 1 <= max_coins <= 10:
+            await interaction.followup.send(
+                "❌ 최대 보유 종목 수는 **1 ~ 10** 사이로 입력해 주세요.", ephemeral=True
+            )
+            return
+
         enabled = self._mode == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
@@ -202,12 +227,13 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
                 return
             user.ai_paper_mode_enabled = enabled
             user.ai_trade_amount = amount
+            user.ai_max_coins = max_coins
             user.ai_trade_style = self._style
             await db.commit()
 
         logger.info(
-            "AI 모의투자 설정 업데이트: user_id=%s enabled=%s amount=%d style=%s",
-            self._user_id, enabled, amount, self._style,
+            "AI 모의투자 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d style=%s",
+            self._user_id, enabled, amount, max_coins, self._style,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
@@ -219,6 +245,7 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 금액 
         )
         embed.add_field(name="AI 모의투자", value=status, inline=True)
         embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
+        embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
         embed.add_field(name="투자 성향", value=style_label, inline=True)
         embed.add_field(name="💰 현재 가상 잔고", value=f"{self._virtual_krw:,.0f} KRW", inline=True)
 
@@ -303,6 +330,7 @@ class PaperTradingCog(commands.Cog):
                 f"AI 모의투자: **{'ON' if user.ai_paper_mode_enabled else 'OFF'}**\n"
                 f"투자 성향: **{style_label}**\n"
                 f"1회 매수: **{int(user.ai_trade_amount):,} KRW** "
+                f"| 최대 종목: **{user.ai_max_coins}개** "
                 f"| 가상 잔고: **{float(user.virtual_krw):,.0f} KRW**"
             ),
             inline=False,

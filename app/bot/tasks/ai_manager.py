@@ -316,7 +316,7 @@ class AIFundManagerTask(commands.Cog):
             )
         elif is_real_active and real_slots <= 0:
             logger.info(
-                "실전 슬롯 없음 (보유=%d / 최대=%d): user_id=%s",
+                "최대 보유 종목 도달로 실전 신규 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                 len(real_running), user.ai_max_coins, user_id,
             )
         elif is_real_active:
@@ -336,7 +336,7 @@ class AIFundManagerTask(commands.Cog):
             )
         elif is_paper_active and paper_slots <= 0:
             logger.info(
-                "모의 슬롯 없음 (보유=%d / 최대=%d): user_id=%s",
+                "[모의] 최대 보유 종목 도달로 신규 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                 len(paper_running), user.ai_max_coins, user_id,
             )
         elif is_paper_active:
@@ -352,6 +352,10 @@ class AIFundManagerTask(commands.Cog):
             is_real_active=is_real_active,
             is_paper_active=is_paper_active,
             trade_style=trade_style,
+            ai_max_coins=user.ai_max_coins,
+            # 이번 사이클 후 최종 보유 종목 수 = 기존 실행 중 + 이번에 신규 매수된 종목
+            real_position_count=len(real_running) + len(real_bought),
+            paper_position_count=len(paper_running) + len(paper_bought),
         )
         await self._send_dm_embed(user_id, embed)
 
@@ -656,6 +660,9 @@ class AIFundManagerTask(commands.Cog):
         is_real_active: bool,
         is_paper_active: bool,
         trade_style: str = "SWING",
+        ai_max_coins: int = 3,
+        real_position_count: int = 0,
+        paper_position_count: int = 0,
     ) -> discord.Embed:
         """실전·모의투자 결과를 하나의 Embed로 통합한다.
 
@@ -664,14 +671,17 @@ class AIFundManagerTask(commands.Cog):
         - 두 모드 모두 없거나 관망이면 중립 색상
 
         Args:
-            market_summary:  AI가 생성한 시장 전반 분석 요약.
-            real_reviewed:   실전 포지션 리뷰 결과 리스트.
-            real_bought:     실전 신규 매수 결과 리스트.
-            paper_reviewed:  모의 포지션 리뷰 결과 리스트.
-            paper_bought:    모의 신규 매수 결과 리스트.
-            is_real_active:  이번 사이클에서 실전 모드가 활성 상태였는지.
-            is_paper_active: 이번 사이클에서 모의 모드가 활성 상태였는지.
-            trade_style:     "SWING" 또는 "SCALPING" — 제목/푸터에 표시.
+            market_summary:        AI가 생성한 시장 전반 분석 요약.
+            real_reviewed:         실전 포지션 리뷰 결과 리스트.
+            real_bought:           실전 신규 매수 결과 리스트.
+            paper_reviewed:        모의 포지션 리뷰 결과 리스트.
+            paper_bought:          모의 신규 매수 결과 리스트.
+            is_real_active:        이번 사이클에서 실전 모드가 활성 상태였는지.
+            is_paper_active:       이번 사이클에서 모의 모드가 활성 상태였는지.
+            trade_style:           "SWING" 또는 "SCALPING" — 제목/푸터에 표시.
+            ai_max_coins:          유저 설정 최대 동시 보유 종목 수.
+            real_position_count:   이번 사이클 후 실전 보유 종목 수 (기존 + 신규).
+            paper_position_count:  이번 사이클 후 모의 보유 종목 수 (기존 + 신규).
 
         Returns:
             단일 discord.Embed 객체.
@@ -714,6 +724,27 @@ class AIFundManagerTask(commands.Cog):
             value=market_summary or "분석 결과를 가져오지 못했습니다.",
             inline=False,
         )
+
+        # ── 포트폴리오 현황 (실전·모의 각각 [현재/최대] 슬롯 표시) ──
+        portfolio_parts: list[str] = []
+        if is_real_active:
+            real_remaining = ai_max_coins - real_position_count
+            portfolio_parts.append(
+                f"실전: **[ {real_position_count} / {ai_max_coins} ]**"
+                f"  _(빈 슬롯 {real_remaining}개)_"
+            )
+        if is_paper_active:
+            paper_remaining = ai_max_coins - paper_position_count
+            portfolio_parts.append(
+                f"🎮모의: **[ {paper_position_count} / {ai_max_coins} ]**"
+                f"  _(빈 슬롯 {paper_remaining}개)_"
+            )
+        if portfolio_parts:
+            embed.add_field(
+                name="📦 포트폴리오 현황",
+                value="\n".join(portfolio_parts),
+                inline=False,
+            )
 
         # ════════════════════════════════════════════════════════════
         # 실전 AI 섹션
