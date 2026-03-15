@@ -294,10 +294,17 @@ class AIFundManagerTask(commands.Cog):
         # ── Step 3: 시장 분석 1회 (실전·모의 공유) ───────────────────
         real_slots  = (user.ai_max_coins - len(real_running))  if is_real_active  else 0
         paper_slots = (user.ai_max_coins - len(paper_running)) if is_paper_active else 0
+
+        # 이번 사이클 가용 예산 계산 (analyze_market 프롬프트 컨텍스트 + 비중 매수 기준)
+        real_available_krw  = float(user.ai_trade_amount) * max(real_slots, 0) if is_real_active  else 0.0
+        paper_available_krw = float(user.virtual_krw)                          if is_paper_active else 0.0
+        ai_context_krw      = max(real_available_krw, paper_available_krw)
+
         holding_symbols: set[str] = {s.symbol for s in real_running + paper_running}
 
-        analysis       = await self.ai_service.analyze_market(
+        analysis = await self.ai_service.analyze_market(
             market_data, holding_symbols, trade_style=trade_style,
+            available_krw=ai_context_krw,
         )
         market_summary = analysis.get("market_summary", "")
         picks: list[dict] = analysis.get("picks", [])
@@ -306,13 +313,15 @@ class AIFundManagerTask(commands.Cog):
         if is_real_active and real_slots > 0 and picks:
             await self._buy_new_coins(
                 user=user,
-                picks=picks[:real_slots],
+                picks=picks,
                 exchange=exchange,
                 ws_manager=ws_manager,
                 registry=registry,
                 bought_positions=real_bought,
                 market_data=market_data,
                 is_paper_mode=False,
+                available_krw=real_available_krw,
+                max_slots=real_slots,
             )
         elif is_real_active and real_slots <= 0:
             logger.info(
@@ -326,13 +335,15 @@ class AIFundManagerTask(commands.Cog):
         if is_paper_active and paper_slots > 0 and picks:
             await self._buy_new_coins(
                 user=user,
-                picks=picks[:paper_slots],
+                picks=picks,
                 exchange=None,
                 ws_manager=ws_manager,
                 registry=registry,
                 bought_positions=paper_bought,
                 market_data=market_data,
                 is_paper_mode=True,
+                available_krw=paper_available_krw,
+                max_slots=paper_slots,
             )
         elif is_paper_active and paper_slots <= 0:
             logger.info(
@@ -434,7 +445,30 @@ class AIFundManagerTask(commands.Cog):
 
             setting_id = pos["setting_id"]
 
-            if action == "UPDATE":
+            if action == "SELL":
+                # 긴급 청산: 워커를 통한 즉시 시장가 매도 후 레지스트리 제거
+                worker = registry.get_worker(setting_id)
+                if worker:
+                    sell_ok = await worker.force_sell(f"🤖 AI 긴급 청산: {reason}")
+                    if sell_ok:
+                        registry._workers.pop(setting_id, None)
+                        logger.info(
+                            "AI 긴급 청산 완료: user_id=%s symbol=%s profit_pct=%.2f%%",
+                            user_id, symbol, pos["profit_pct"],
+                        )
+                    else:
+                        logger.warning(
+                            "AI 긴급 청산 실패 (force_sell 반환 False): user_id=%s symbol=%s",
+                            user_id, symbol,
+                        )
+                else:
+                    logger.warning(
+                        "AI 긴급 청산: 워커 없음 (이미 종료됐을 수 있음): "
+                        "user_id=%s symbol=%s setting_id=%s",
+                        user_id, symbol, setting_id,
+                    )
+
+            elif action == "UPDATE":
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(
                         select(BotSetting).where(BotSetting.id == setting_id)
@@ -483,8 +517,16 @@ class AIFundManagerTask(commands.Cog):
         bought_positions: list[dict],
         market_data: dict[str, dict],
         is_paper_mode: bool = False,
+        available_krw: float = 0.0,
+        max_slots: int = 0,
     ) -> None:
         """AI가 선정한 신규 종목을 매수(실거래) 또는 가상 체결(모의투자)하고 워커를 등록한다.
+
+        매수 금액은 score/weight 기반으로 자동 산정한다:
+          - score ≥ 80 인 픽만 채택 (미달 시 스킵)
+          - weight_pct 합계가 100 초과 시 비례 정규화
+          - trade_amount = available_krw × (weight_pct / 100)
+          - trade_amount < 5,000 KRW 이면 최소 금액 미달로 스킵
 
         실거래:
           - ExchangeService.create_market_buy_order() 호출
@@ -497,24 +539,66 @@ class AIFundManagerTask(commands.Cog):
 
         Args:
             user:             처리 대상 User 인스턴스.
-            picks:            _process_user에서 슬롯 수만큼 슬라이싱된 픽 리스트.
+            picks:            AI 분석 전체 픽 리스트 (score/weight 필터는 내부에서 수행).
             exchange:         실거래 시 ExchangeService, 모의투자 시 None.
             ws_manager:       UpbitWebsocketManager 인스턴스.
             registry:         WorkerRegistry 인스턴스.
             bought_positions: 결과를 축적할 리스트 (DM 리포트용).
             market_data:      MarketDataManager.get_all() 결과 — WS 캐시 미스 시 Fallback 가격 제공.
             is_paper_mode:    True = 모의투자 / False = 실거래.
+            available_krw:    이번 사이클 가용 예산 (비중 기반 매수금액 산출 기준).
+            max_slots:        이번 사이클 최대 신규 매수 가능 슬롯 수.
         """
-        user_id      = user.user_id
-        trade_amount = float(user.ai_trade_amount)
+        user_id = user.user_id
+
+        # ── Score 필터: score ≥ 80 인 픽만 채택 ───────────────────────
+        qualified_picks = [p for p in picks if (p.get("score") or 0) >= 80]
+        if not qualified_picks:
+            logger.info(
+                "AI score ≥ 80 필터 후 유효 픽 없음: user_id=%s is_paper=%s",
+                user_id, is_paper_mode,
+            )
+            return
+
+        # ── Weight 정규화: 합계가 100%를 초과하면 비례 축소 ─────────
+        total_weight = sum((p.get("weight_pct") or 0) for p in qualified_picks)
+        if total_weight > 100:
+            scale = 100.0 / total_weight
+            for p in qualified_picks:
+                p["weight_pct"] = (p.get("weight_pct") or 0) * scale
+            logger.info(
+                "AI weight 정규화 (합계 %.1f%% → 100%%): user_id=%s is_paper=%s",
+                total_weight, user_id, is_paper_mode,
+            )
 
         # 사이클 내 가상 잔고 추적 (동일 사이클 내 여러 종목 매수 시 과잉 차감 방지)
         remaining_virtual_krw: float = float(user.virtual_krw) if is_paper_mode else 0.0
+        slots_used = 0
 
-        for pick in picks:
+        for pick in qualified_picks:
+            # 슬롯 한도 도달 시 중단
+            if max_slots > 0 and slots_used >= max_slots:
+                logger.info(
+                    "슬롯 한도 도달, 신규 매수 중단: user_id=%s used=%d max=%d",
+                    user_id, slots_used, max_slots,
+                )
+                break
+
             symbol        = pick["symbol"]
             target_profit = pick["target_profit_pct"]
             stop_loss     = pick["stop_loss_pct"]
+            weight_pct    = pick.get("weight_pct") or 0.0
+            score         = pick.get("score") or 0
+
+            # ── 비중 기반 매수 금액 산출 ──────────────────────────────
+            trade_amount = available_krw * (weight_pct / 100.0)
+            if trade_amount < 5_000:
+                logger.info(
+                    "비중 기반 매수 금액 미달 스킵 (%.0f KRW < 5,000): "
+                    "user_id=%s symbol=%s weight=%.1f%%",
+                    trade_amount, user_id, symbol, weight_pct,
+                )
+                continue
 
             try:
                 current_price = ws_manager.get_price(symbol)
@@ -631,12 +715,18 @@ class AIFundManagerTask(commands.Cog):
                         "amount_coin":       amount_coin,
                         "target_profit_pct": target_profit,
                         "stop_loss_pct":     stop_loss,
+                        "score":             score,
+                        "weight_pct":        weight_pct,
+                        "trade_amount":      trade_amount,
                     }
                 )
+                slots_used += 1
                 logger.info(
-                    "AI %s매수 완료: user_id=%s symbol=%s price=%.0f amount=%.6f",
+                    "AI %s매수 완료: user_id=%s symbol=%s price=%.0f amount=%.6f "
+                    "score=%d weight=%.1f%% trade_amount=%.0f",
                     "[모의] " if is_paper_mode else "",
                     user_id, symbol, buy_price, amount_coin,
+                    score, weight_pct, trade_amount,
                 )
 
             except Exception as exc:
@@ -750,6 +840,25 @@ class AIFundManagerTask(commands.Cog):
         # 실전 AI 섹션
         # ════════════════════════════════════════════════════════════
         if is_real_active:
+            # 긴급 청산 (SELL)
+            sold_real = [r for r in real_reviewed if r["action"] == "SELL"]
+            if sold_real:
+                embed.add_field(
+                    name=f"🚨 실전 긴급 청산 ({len(sold_real)}건)",
+                    value="\u200b",
+                    inline=False,
+                )
+                for item in sold_real:
+                    icon = "📈" if item["profit_pct"] >= 0 else "📉"
+                    embed.add_field(
+                        name=f"🪙 {item['symbol']} [긴급청산]",
+                        value=(
+                            f"**청산 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
+                            f"**AI 판단:** {item['reason']}"
+                        ),
+                        inline=False,
+                    )
+
             # 신규 매수
             if real_bought:
                 embed.add_field(
@@ -761,8 +870,11 @@ class AIFundManagerTask(commands.Cog):
                     embed.add_field(
                         name=f"🪙 {item['symbol']} [신규]",
                         value=(
-                            f"**매수가:** {item['buy_price']:,.0f} KRW\n"
+                            f"**매수가:** {item['buy_price']:,.0f} KRW"
+                            f"  |  **매수금액:** {item.get('trade_amount', 0):,.0f} KRW\n"
                             f"**수량:** {item['amount_coin']:.6f}\n"
+                            f"**매력도:** {item.get('score', 0)}점"
+                            f"  |  **비중:** {item.get('weight_pct', 0):.1f}%\n"
                             f"**익절:** +{item['target_profit_pct']:.1f}%  |  "
                             f"**손절:** -{item['stop_loss_pct']:.1f}%\n"
                             f"**AI 분석:** {item['reason']}"
@@ -791,8 +903,8 @@ class AIFundManagerTask(commands.Cog):
                         inline=False,
                     )
 
-            # 기존 유지
-            maintained_real = [r for r in real_reviewed if r["action"] == "MAINTAIN"]
+            # 기존 유지 (HOLD)
+            maintained_real = [r for r in real_reviewed if r["action"] == "HOLD"]
             if maintained_real:
                 lines = [
                     f"• **{r['symbol']}** — {r['profit_pct']:+.2f}%"
@@ -825,6 +937,25 @@ class AIFundManagerTask(commands.Cog):
                     inline=False,
                 )
 
+            # 모의 긴급 청산 (SELL)
+            sold_paper = [r for r in paper_reviewed if r["action"] == "SELL"]
+            if sold_paper:
+                embed.add_field(
+                    name=f"🚨 [🎮모의] 긴급 청산 ({len(sold_paper)}건)",
+                    value="\u200b",
+                    inline=False,
+                )
+                for item in sold_paper:
+                    icon = "📈" if item["profit_pct"] >= 0 else "📉"
+                    embed.add_field(
+                        name=f"🪙 {item['symbol']} [🎮모의 긴급청산]",
+                        value=(
+                            f"**청산 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
+                            f"**AI 판단:** {item['reason']}"
+                        ),
+                        inline=False,
+                    )
+
             # 신규 가상 매수
             if paper_bought:
                 embed.add_field(
@@ -837,8 +968,11 @@ class AIFundManagerTask(commands.Cog):
                         name=f"🪙 {item['symbol']} [🎮모의 신규]",
                         value=(
                             f"**매수가:** {item['buy_price']:,.0f} KRW"
-                            f" _(슬리피지 0.1% 반영)_\n"
+                            f" _(슬리피지 0.1% 반영)_"
+                            f"  |  **매수금액:** {item.get('trade_amount', 0):,.0f} KRW\n"
                             f"**수량:** {item['amount_coin']:.6f}\n"
+                            f"**매력도:** {item.get('score', 0)}점"
+                            f"  |  **비중:** {item.get('weight_pct', 0):.1f}%\n"
                             f"**익절:** +{item['target_profit_pct']:.1f}%  |  "
                             f"**손절:** -{item['stop_loss_pct']:.1f}%\n"
                             f"**AI 분석:** {item['reason']}"
@@ -867,8 +1001,8 @@ class AIFundManagerTask(commands.Cog):
                         inline=False,
                     )
 
-            # 모의 기존 유지
-            maintained_paper = [r for r in paper_reviewed if r["action"] == "MAINTAIN"]
+            # 모의 기존 유지 (HOLD)
+            maintained_paper = [r for r in paper_reviewed if r["action"] == "HOLD"]
             if maintained_paper:
                 lines = [
                     f"• **{r['symbol']}** — {r['profit_pct']:+.2f}%"
