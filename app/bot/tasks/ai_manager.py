@@ -624,6 +624,15 @@ class AIFundManagerTask(commands.Cog):
                     )
                     continue
 
+                # ── 엽전주 하드 가드: AI 환각·오류로 100원 미만 코인이 picks에
+                # 포함되더라도 매수가 절대 체결되지 않도록 이중 방어한다. ──────
+                if current_price < 100:
+                    logger.warning(
+                        "[AI DEBUG] 100원 미만 엽전주 매수 시도 차단: %s (가격: %s)",
+                        symbol, current_price,
+                    )
+                    continue
+
                 if is_paper_mode:
                     # ── 모의투자: 가상 잔고 체크 → 가상 체결 ──────────
                     if remaining_virtual_krw < trade_amount:
