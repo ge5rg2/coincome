@@ -29,6 +29,7 @@ from app.models.trade_history import TradeHistory
 from app.models.user import SubscriptionTier, User
 from app.services.trading_worker import WorkerRegistry
 from app.services.websocket import UpbitWebsocketManager
+from app.utils.format import format_krw_price
 from app.utils.time import get_next_run_time_for_style
 
 logger = logging.getLogger(__name__)
@@ -564,7 +565,8 @@ class PaperTradingCog(commands.Cog):
                         icon = "🟢" if pct >= 0 else "🔴"
                         real_lines.append(
                             f"{icon} **{s.symbol}** | "
-                            f"{float(s.buy_price):,.0f} → {current_price:,.0f} KRW"
+                            f"{format_krw_price(float(s.buy_price))} → "
+                            f"{format_krw_price(current_price)} KRW"
                             f" | **{pct:+.2f}%**"
                         )
                     elif s.buy_price is None:
@@ -591,7 +593,8 @@ class PaperTradingCog(commands.Cog):
                     date_str = h.created_at.strftime("%m/%d %H:%M") if h.created_at else "-"
                     rec_lines.append(
                         f"{icon} **{h.symbol}** `{date_str}` | "
-                        f"{h.buy_price:,.0f} → {h.sell_price:,.0f} KRW"
+                        f"{format_krw_price(h.buy_price)} → "
+                        f"{format_krw_price(h.sell_price)} KRW"
                         f" | **{h.profit_pct:+.2f}%**"
                     )
                 embed.add_field(
@@ -649,7 +652,8 @@ class PaperTradingCog(commands.Cog):
                     icon = "🟢" if pct >= 0 else "🔴"
                     paper_lines.append(
                         f"{icon} **{s.symbol}**\n"
-                        f"  매수: {float(s.buy_price):,.0f} → 현재: {current_price:,.0f} KRW"
+                        f"  매수: {format_krw_price(float(s.buy_price))} → "
+                        f"현재: {format_krw_price(current_price)} KRW"
                         f" | **{pct:+.2f}%** ({pnl:+,.0f} KRW)"
                     )
                 elif s.buy_price is None:
@@ -680,7 +684,8 @@ class PaperTradingCog(commands.Cog):
                 date_str = h.created_at.strftime("%m/%d %H:%M") if h.created_at else "-"
                 rec_lines_paper.append(
                     f"{icon} **{h.symbol}** `{date_str}`\n"
-                    f"  {h.buy_price:,.0f} → {h.sell_price:,.0f} KRW"
+                    f"  {format_krw_price(h.buy_price)} → "
+                    f"{format_krw_price(h.sell_price)} KRW"
                     f" | **{h.profit_pct:+.2f}%** ({h.profit_krw:+,.0f} KRW)"
                 )
             embed.add_field(

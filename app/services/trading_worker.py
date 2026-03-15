@@ -26,6 +26,7 @@ from app.models.trade_history import TradeHistory
 from app.models.user import User
 from app.services.exchange import ExchangeService
 from app.services.websocket import UpbitWebsocketManager
+from app.utils.format import format_krw_price
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +217,7 @@ class TradingWorker:
             await self.notify(
                 self.user_id,
                 f"🔄 **{mode_tag}포지션 복구** `{self.symbol}`\n"
-                f"매수가: {float(setting.buy_price):,.0f} KRW  |  "
+                f"매수가: {format_krw_price(float(setting.buy_price))} KRW  |  "
                 f"수량: {float(setting.amount_coin):.6f}\n"
                 f"매도 감시를 재개합니다.",
             )
@@ -291,7 +292,7 @@ class TradingWorker:
             await self.notify(
                 self.user_id,
                 f"🎮 **[모의투자] 매수 체결** `{self.symbol}`\n"
-                f"매수가: {fill_price:,.0f} KRW (슬리피지 0.1% 반영)\n"
+                f"매수가: {format_krw_price(fill_price)} KRW (슬리피지 0.1% 반영)\n"
                 f"수량: {amount_coin:.6f}\n"
                 f"투자금액: {safe_buy_amount:,.0f} KRW",
             )
@@ -319,7 +320,7 @@ class TradingWorker:
         await self.notify(
             self.user_id,
             f"✅ **매수 체결** `{self.symbol}`\n"
-            f"매수가: {current_price:,.0f} KRW\n"
+            f"매수가: {format_krw_price(current_price)} KRW\n"
             f"수량: {amount_coin:.6f}\n"
             f"투자금액: {safe_buy_amount:,.0f} KRW (수수료 여유분 0.1% 제외)",
         )
@@ -478,7 +479,8 @@ class TradingWorker:
                 self.user_id,
                 f"{'🟢' if realized_pnl >= 0 else '🔴'} **[🎮 모의투자] 매도 체결** "
                 f"`{self.symbol}` — {reason}\n"
-                f"매수가: {pos.buy_price:,.0f} KRW  →  매도가: {sell_price:,.0f} KRW\n"
+                f"매수가: {format_krw_price(pos.buy_price)} KRW  →  "
+                f"매도가: {format_krw_price(sell_price)} KRW\n"
                 f"수익률: **{profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
             )
             self._position = None
@@ -561,7 +563,8 @@ class TradingWorker:
         await self.notify(
             self.user_id,
             f"{'🟢' if realized_pnl >= 0 else '🔴'} **매도 체결** `{self.symbol}` — {reason}\n"
-            f"매수가: {pos.buy_price:,.0f} KRW  →  매도가: {sell_price:,.0f} KRW\n"
+            f"매수가: {format_krw_price(pos.buy_price)} KRW  →  "
+            f"매도가: {format_krw_price(sell_price)} KRW\n"
             f"수익률: **{actual_profit_pct:+.2f}%** | 손익: {realized_pnl:+,.0f} KRW",
         )
         self._position = None
