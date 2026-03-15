@@ -1,6 +1,12 @@
 # 1. 파이썬 3.12 슬림 버전 사용 (가볍고 빠름)
 FROM python:3.12-slim
 
+# [추가된 핵심 로직] 한글 깨짐 방지를 위한 언어팩(Locale) 설치
+RUN apt-get update && apt-get install -y locales && \
+    localedef -f UTF-8 -i ko_KR ko_KR.UTF-8
+ENV LANG=ko_KR.UTF-8
+ENV LC_ALL=ko_KR.UTF-8
+
 # 2. 한국 시간대(KST) 설정 (봇의 시간/로그가 한국 시간에 맞게 찍히도록)
 ENV TZ=Asia/Seoul
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
