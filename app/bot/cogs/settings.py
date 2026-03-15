@@ -20,6 +20,7 @@ from app.models.bot_setting import BotSetting
 from app.models.user import User
 from app.services.exchange import ExchangeService
 from app.services.trading_worker import TradingWorker, WorkerRegistry
+from app.utils.format import format_krw_price
 
 logger = logging.getLogger(__name__)
 
@@ -594,8 +595,8 @@ class SettingsCog(commands.Cog):
                 status_icon = "🟢" if profit_pct >= 0 else "🔴"
 
                 value = (
-                    f"**매수가:** {s.buy_price:,.0f} KRW\n"
-                    f"**현재가:** {current_price:,.0f} KRW\n"
+                    f"**매수가:** {format_krw_price(s.buy_price)} KRW\n"
+                    f"**현재가:** {format_krw_price(current_price)} KRW\n"
                     f"**수익률:** {status_icon} **{profit_pct:+.2f}%** ({pnl:+,.0f} KRW)\n"
                     f"**수량:** {s.amount_coin:.6f}\n"
                     f"{config_line}"

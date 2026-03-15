@@ -53,6 +53,7 @@ from app.services.exchange import ExchangeService
 from app.services.market_data import MarketDataManager
 from app.services.trading_worker import TradingWorker, WorkerRegistry
 from app.services.websocket import UpbitWebsocketManager
+from app.utils.format import format_krw_price
 from app.utils.time import get_next_run_time_for_style
 
 logger = logging.getLogger(__name__)
@@ -870,7 +871,7 @@ class AIFundManagerTask(commands.Cog):
                     embed.add_field(
                         name=f"🪙 {item['symbol']} [신규]",
                         value=(
-                            f"**매수가:** {item['buy_price']:,.0f} KRW"
+                            f"**매수가:** {format_krw_price(item['buy_price'])} KRW"
                             f"  |  **매수금액:** {item.get('trade_amount', 0):,.0f} KRW\n"
                             f"**수량:** {item['amount_coin']:.6f}\n"
                             f"**매력도:** {item.get('score', 0)}점"
@@ -967,7 +968,7 @@ class AIFundManagerTask(commands.Cog):
                     embed.add_field(
                         name=f"🪙 {item['symbol']} [🎮모의 신규]",
                         value=(
-                            f"**매수가:** {item['buy_price']:,.0f} KRW"
+                            f"**매수가:** {format_krw_price(item['buy_price'])} KRW"
                             f" _(슬리피지 0.1% 반영)_"
                             f"  |  **매수금액:** {item.get('trade_amount', 0):,.0f} KRW\n"
                             f"**수량:** {item['amount_coin']:.6f}\n"

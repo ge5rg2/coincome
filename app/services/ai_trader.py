@@ -53,6 +53,7 @@ import logging
 from openai import AsyncOpenAI
 
 from app.config import settings
+from app.utils.format import format_krw_price
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,7 @@ weight_pct 기준:
 - [절대 규칙 2 - 관망의 조건] picks 배열을 []로 비울 것이라면, market_summary에도 "모든 코인이 과매수이거나 추세가 깨져서 전액 현금 관망한다"라고 철저히 부정적으로만 적어야 한다.
 - [절대 규칙 3 - symbol 형식] symbol은 반드시 "코인명/KRW" 형태로 작성하라. (예: BTC/KRW, ETH/KRW)
 - [절대 규칙 4 - 숫자 형식] 모든 숫자 필드는 % 기호나 +/- 부호 없이 순수 숫자만 적어라.
+- [절대 규칙 5 - 동전주 금지] 현재가(price)가 **100 KRW 미만인 코인(동전주/엽전주)은 틱 단위 변동성이 너무 커서 리스크 관리가 불가능하므로, 아무리 지표가 좋아도 절대 picks 배열에 포함하지 말고 스킵**하라.
 
 [올바른 응답 예시]
 {
@@ -190,6 +192,7 @@ weight_pct 기준:
 - [절대 규칙 2 - 관망의 조건] picks 배열을 []로 비우고 싶다면, market_summary에도 반드시 "모든 코인의 상태가 나빠서 전액 관망한다"라고 부정적으로만 적어야 한다.
 - [절대 규칙 3 - symbol 형식] symbol은 반드시 "코인명/KRW" 형태로 작성하라. (예: ETH/KRW, SOL/KRW)
 - [절대 규칙 4 - 숫자 형식] 모든 숫자 필드는 % 기호나 +/- 부호 없이 순수 숫자만 적어라.
+- [절대 규칙 5 - 동전주 금지] 현재가(price)가 **100 KRW 미만인 코인(동전주/엽전주)은 틱 단위 변동성이 너무 커서 리스크 관리가 불가능하므로, 아무리 지표가 좋아도 절대 picks 배열에 포함하지 말고 스킵**하라.
 - [공격적 실행] 조건에 부합하는 종목이 단 1개라도 있다면 주저하지 말고 즉시 picks에 담아라.
 
 [올바른 응답 예시]
@@ -321,9 +324,9 @@ class AITraderService:
                 rsi14 = data.get("rsi14")
                 ma20  = data.get("ma20")
 
-            price_str = f"{price:,.0f} KRW" if price is not None else "N/A"
-            rsi_str   = f"{rsi14:.1f}"      if rsi14  is not None else "N/A"
-            ma_str    = f"{ma20:,.0f}"      if ma20   is not None else "N/A"
+            price_str = f"{format_krw_price(price)} KRW" if price is not None else "N/A"
+            rsi_str   = f"{rsi14:.1f}"                  if rsi14  is not None else "N/A"
+            ma_str    = f"{format_krw_price(ma20)}"     if ma20   is not None else "N/A"
             chg_str   = f"{chg:+.2f}%"     if chg    is not None else "N/A"
             vol_str   = f"{vol / 1e8:.1f}억" if vol   is not None else "N/A"
 
@@ -494,12 +497,12 @@ class AITraderService:
                 rsi14 = mdata.get("rsi14")
                 ma20  = mdata.get("ma20")
 
-            rsi_str = f"{rsi14:.1f}" if rsi14 is not None else "N/A"
-            ma_str  = f"{ma20:,.0f}" if ma20  is not None else "N/A"
+            rsi_str = f"{rsi14:.1f}"             if rsi14 is not None else "N/A"
+            ma_str  = f"{format_krw_price(ma20)}" if ma20  is not None else "N/A"
 
             lines.append(
                 f"- {symbol}: "
-                f"매수가={buy_price:,.0f}KRW  현재가={cur_price:,.0f}KRW  "
+                f"매수가={format_krw_price(buy_price)}KRW  현재가={format_krw_price(cur_price)}KRW  "
                 f"수익률={profit_pct:+.2f}%  "
                 f"목표익절={tgt:.1f}%  손절기준={sl:.1f}%  "
                 f"RSI14={rsi_str}  MA20={ma_str}"

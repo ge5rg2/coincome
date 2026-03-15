@@ -27,6 +27,7 @@ from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
 from app.models.user import User
 from app.services.websocket import UpbitWebsocketManager
+from app.utils.format import format_krw_price
 
 logger = logging.getLogger(__name__)
 
@@ -199,14 +200,14 @@ class ReportCog(commands.Cog):
                 has_position = True
                 status_icon = "🟢" if profit_pct >= 0 else "🔴"
                 value = (
-                    f"**매수가:** {s.buy_price:,.0f} KRW\n"
-                    f"**현재가:** {current_price:,.0f} KRW\n"
+                    f"**매수가:** {format_krw_price(s.buy_price)} KRW\n"
+                    f"**현재가:** {format_krw_price(current_price)} KRW\n"
                     f"**수익률:** {status_icon} **{profit_pct:+.2f}%** ({pnl:+,.0f} KRW)\n"
                     f"**수량:** {s.amount_coin:.6f}"
                 )
             elif current_price:
                 # 매수 대기 중 — 현재가만 표시
-                value = f"⏳ 매수 대기 중\n**현재가:** {current_price:,.0f} KRW"
+                value = f"⏳ 매수 대기 중\n**현재가:** {format_krw_price(current_price)} KRW"
             else:
                 # 시세 미수신 (WebSocket 초기화 중)
                 value = "⏳ 매수 대기 중 또는 시세 로딩 중..."
