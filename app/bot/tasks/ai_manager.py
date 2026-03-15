@@ -1,12 +1,17 @@
 """
-AIFundManagerTask: 업비트 4시간 봉 완성 정각(KST)에 동기화되어 실행되는 AI 펀드 매니저.
+AIFundManagerTask: 매시 정각에 실행되며 투자 성향(trade_style)에 따라 유저를 필터링하는 AI 펀드 매니저.
 
-트리거 시각 (KST, 업비트 4h 봉 마감 정각):
-  01:00 / 05:00 / 09:00 / 13:00 / 17:00 / 21:00
+트리거 시각 (KST, 매시 정각):
+  00:00 ~ 23:00 (24회/일)
+
+투자 성향별 동작:
+  SCALPING — 매시 정각 실행 (1시간 봉 단타, 총 24회/일)
+  SWING    — 4시간 봉 마감 정각에만 실행 (01/05/09/13/17/21시 KST, 6회/일)
 
 처리 대상 (단일 OR 쿼리):
   (VIP + ai_mode_enabled=True) OR ai_paper_mode_enabled=True  — is_active=True 조건 공통
   → 두 모드를 동시에 켠 유저도 단일 _process_user 호출로 처리.
+  → 현재 시각이 SWING 시간대가 아닌 경우, ai_trade_style='SWING' 유저는 스킵.
 
 격리 아키텍처:
   ┌─ _process_user(user) ──────────────────────────────────────────┐
@@ -48,28 +53,31 @@ from app.services.exchange import ExchangeService
 from app.services.market_data import MarketDataManager
 from app.services.trading_worker import TradingWorker, WorkerRegistry
 from app.services.websocket import UpbitWebsocketManager
-from app.utils.time import get_next_ai_run_time
+from app.utils.time import get_next_run_time_for_style
 
 logger = logging.getLogger(__name__)
 
 # ------------------------------------------------------------------
-# 업비트 4시간 봉 마감 정각 (KST)
+# 스케줄 상수
 # ------------------------------------------------------------------
 
 _KST = ZoneInfo("Asia/Seoul")
 
+# 매시 정각 24개 (00:00 ~ 23:00 KST)
 _LOOP_TIMES: list[datetime.time] = [
-    datetime.time(hour=1,  minute=0, second=0, tzinfo=_KST),
-    datetime.time(hour=5,  minute=0, second=0, tzinfo=_KST),
-    datetime.time(hour=9,  minute=0, second=0, tzinfo=_KST),
-    datetime.time(hour=13, minute=0, second=0, tzinfo=_KST),
-    datetime.time(hour=17, minute=0, second=0, tzinfo=_KST),
-    datetime.time(hour=21, minute=0, second=0, tzinfo=_KST),
+    datetime.time(hour=h, minute=0, second=0, tzinfo=_KST)
+    for h in range(24)
 ]
+
+# SWING 모드 전용 실행 시각 (업비트 4시간 봉 마감 정각 KST)
+# app/utils/time.py 의 _SWING_SCHEDULE_HOURS 와 반드시 동기화 유지
+_SWING_HOURS: frozenset[int] = frozenset({1, 5, 9, 13, 17, 21})
 
 
 class AIFundManagerTask(commands.Cog):
-    """4시간마다 포지션 리뷰·신규 매수·DM 통합 리포트를 수행하는 백그라운드 Cog.
+    """매시간 포지션 리뷰·신규 매수·DM 통합 리포트를 수행하는 백그라운드 Cog.
+
+    SCALPING 유저는 매시 정각 처리, SWING 유저는 4시간 봉 마감 시각에만 처리.
 
     Attributes:
         bot:        Discord 봇 인스턴스.
@@ -86,29 +94,40 @@ class AIFundManagerTask(commands.Cog):
         self.fund_loop.cancel()
 
     # ------------------------------------------------------------------
-    # 업비트 4시간 봉 정각 루프 (KST 01/05/09/13/17/21시)
+    # 매시 정각 루프 (KST 00:00 ~ 23:00)
     # ------------------------------------------------------------------
 
     @tasks.loop(time=_LOOP_TIMES)
     async def fund_loop(self) -> None:
-        """업비트 4h 봉 완성 정각(KST)에 포지션 리뷰·신규 매수를 실행하는 메인 루프.
+        """매시 정각에 포지션 리뷰·신규 매수를 실행하는 메인 루프.
 
         처리 흐름:
           0. 10초 대기 (업비트 서버 캔들 롤오버 안정화)
-          1. MarketDataManager 캐시 존재 확인
-          2. DB: (VIP + ai_mode_enabled) OR ai_paper_mode_enabled 유저 단일 쿼리
-          3. 각 유저별 _process_user() 실행 (실전·모의 이중 사이클 처리)
+          1. 현재 KST 시각 확인 → SWING 실행 여부 결정
+          2. MarketDataManager 캐시 존재 확인
+          3. DB: 성향별 적절한 유저 조회
+             - SWING 시간대: SWING + SCALPING 유저 모두
+             - SCALPING 전용 시간대: SCALPING 유저만
+          4. 각 유저별 _process_user() 실행 (trade_style 전달)
         """
         await asyncio.sleep(10)
-        logger.info("AI 펀드 매니저 루프 실행")
 
-        # 1. 마켓 데이터 캐시 확인
+        # 1. 현재 KST 시각으로 SWING 실행 여부 결정
+        current_hour = datetime.datetime.now(_KST).hour
+        is_swing_hour = current_hour in _SWING_HOURS
+
+        logger.info(
+            "AI 펀드 매니저 루프 실행 (KST %02d:00 | SWING=%s)",
+            current_hour, is_swing_hour,
+        )
+
+        # 2. 마켓 데이터 캐시 확인
         market_data = MarketDataManager.get().get_all()
         if not market_data:
             logger.warning("AI 펀드 매니저: 마켓 데이터 캐시 없음 — 스킵")
             return
 
-        # 2. 단일 OR 쿼리: (VIP + ai_mode_enabled) OR ai_paper_mode_enabled
+        # 3. 단일 OR 쿼리: (VIP + ai_mode_enabled) OR ai_paper_mode_enabled
         async with AsyncSessionLocal() as db:
             result = await db.execute(
                 select(User)
@@ -124,24 +143,43 @@ class AIFundManagerTask(commands.Cog):
                 )
                 .options(selectinload(User.bot_settings))
             )
-            target_users: list[User] = result.scalars().all()
+            all_users: list[User] = result.scalars().all()
 
-        if not target_users:
+        if not all_users:
             logger.info("AI 펀드 매니저: 대상 유저 없음")
             return
 
-        # 실전·모의 동시 활성 유저 수 집계 (로그용)
-        real_count  = sum(
+        # 4. 성향별 필터링:
+        #    - SWING 시간대: 모든 유저 처리
+        #    - SCALPING 전용 시간대: SCALPING 유저만 처리 (SWING 유저 스킵)
+        if is_swing_hour:
+            target_users = all_users
+        else:
+            target_users = [
+                u for u in all_users if u.ai_trade_style == "SCALPING"
+            ]
+
+        if not target_users:
+            logger.info(
+                "AI 펀드 매니저: SCALPING 유저 없음 (SWING 전용 시간대 아님, hour=%d)",
+                current_hour,
+            )
+            return
+
+        # 집계 로그
+        scalping_count = sum(1 for u in target_users if u.ai_trade_style == "SCALPING")
+        swing_count    = sum(1 for u in target_users if u.ai_trade_style != "SCALPING")
+        real_count     = sum(
             1 for u in target_users
             if u.subscription_tier == SubscriptionTier.VIP and u.ai_mode_enabled
         )
-        paper_count = sum(1 for u in target_users if u.ai_paper_mode_enabled)
+        paper_count    = sum(1 for u in target_users if u.ai_paper_mode_enabled)
         logger.info(
-            "AI 펀드 매니저 대상: 전체=%d명 (실전=%d명 / 모의=%d명, 중복 포함)",
-            len(target_users), real_count, paper_count,
+            "AI 펀드 매니저 대상: 전체=%d명 (실전=%d명/모의=%d명, SWING=%d명/SCALPING=%d명)",
+            len(target_users), real_count, paper_count, swing_count, scalping_count,
         )
 
-        # 3. 유저별 처리
+        # 5. 유저별 처리
         for user in target_users:
             try:
                 await self._process_user(user, market_data)
@@ -151,7 +189,7 @@ class AIFundManagerTask(commands.Cog):
                 )
             await asyncio.sleep(1)
 
-        logger.info("AI 펀드 매니저 루프 완료")
+        logger.info("AI 펀드 매니저 루프 완료 (hour=%d)", current_hour)
 
     @fund_loop.before_loop
     async def before_fund_loop(self) -> None:
@@ -172,7 +210,7 @@ class AIFundManagerTask(commands.Cog):
         처리 순서:
           1. 실전 포지션 리뷰  (is_ai_managed=True, is_paper_trading=False)
           2. 모의 포지션 리뷰  (is_paper_trading=True)
-          3. 시장 분석 1회     (실전·모의 공유 — API 비용 절감)
+          3. 시장 분석 1회     (실전·모의 공유 — API 비용 절감, trade_style 적용)
           4. 실전 신규 매수    (ExchangeService 호출, VIP only)
           5. 모의 신규 매수    (virtual_krw 차감, API 호출 없음)
           6. 단일 통합 DM Embed 발송
@@ -181,7 +219,8 @@ class AIFundManagerTask(commands.Cog):
             user:        처리 대상 User 인스턴스 (bot_settings eagerly loaded).
             market_data: MarketDataManager.get_all() 결과.
         """
-        user_id   = user.user_id
+        user_id    = user.user_id
+        trade_style = getattr(user, "ai_trade_style", "SWING") or "SWING"
         ws_manager = UpbitWebsocketManager.get()
         registry   = WorkerRegistry.get()
 
@@ -237,6 +276,7 @@ class AIFundManagerTask(commands.Cog):
                 ws_manager=ws_manager,
                 registry=registry,
                 reviewed_positions=real_reviewed,
+                trade_style=trade_style,
             )
 
         # ── Step 2: 모의 포지션 리뷰 ─────────────────────────────────
@@ -248,6 +288,7 @@ class AIFundManagerTask(commands.Cog):
                 ws_manager=ws_manager,
                 registry=registry,
                 reviewed_positions=paper_reviewed,
+                trade_style=trade_style,
             )
 
         # ── Step 3: 시장 분석 1회 (실전·모의 공유) ───────────────────
@@ -255,7 +296,9 @@ class AIFundManagerTask(commands.Cog):
         paper_slots = (user.ai_max_coins - len(paper_running)) if is_paper_active else 0
         holding_symbols: set[str] = {s.symbol for s in real_running + paper_running}
 
-        analysis       = await self.ai_service.analyze_market(market_data, holding_symbols)
+        analysis       = await self.ai_service.analyze_market(
+            market_data, holding_symbols, trade_style=trade_style,
+        )
         market_summary = analysis.get("market_summary", "")
         picks: list[dict] = analysis.get("picks", [])
 
@@ -306,6 +349,7 @@ class AIFundManagerTask(commands.Cog):
             paper_bought=paper_bought,
             is_real_active=is_real_active,
             is_paper_active=is_paper_active,
+            trade_style=trade_style,
         )
         await self._send_dm_embed(user_id, embed)
 
@@ -321,11 +365,11 @@ class AIFundManagerTask(commands.Cog):
         ws_manager: UpbitWebsocketManager,
         registry: WorkerRegistry,
         reviewed_positions: list[dict],
+        trade_style: str = "SWING",
     ) -> None:
         """보유 포지션을 AI로 리뷰해 UPDATE 시 DB·워커 인메모리를 동기화한다.
 
         실전·모의 구분 없이 동일한 로직으로 동작한다.
-        (포지션 리뷰는 AI가 시장 데이터 기반으로 목표값만 조정하므로 모드 무관)
 
         Args:
             user_id:            Discord 사용자 ID.
@@ -334,6 +378,7 @@ class AIFundManagerTask(commands.Cog):
             ws_manager:         UpbitWebsocketManager 인스턴스.
             registry:           WorkerRegistry 인스턴스.
             reviewed_positions: 결과를 축적할 리스트 (DM 리포트용).
+            trade_style:        "SWING" 또는 "SCALPING" — 사용할 지표 타임프레임 결정.
         """
         positions_data: list[dict] = []
         for s in running_settings:
@@ -363,7 +408,9 @@ class AIFundManagerTask(commands.Cog):
         if not positions_data:
             return
 
-        reviews = await self.ai_service.review_positions(positions_data, market_data)
+        reviews = await self.ai_service.review_positions(
+            positions_data, market_data, trade_style=trade_style,
+        )
         if not reviews:
             logger.info("AI 포지션 리뷰 결과 없음: user_id=%s", user_id)
             return
@@ -590,6 +637,7 @@ class AIFundManagerTask(commands.Cog):
         paper_bought: list[dict],
         is_real_active: bool,
         is_paper_active: bool,
+        trade_style: str = "SWING",
     ) -> discord.Embed:
         """실전·모의투자 결과를 하나의 Embed로 통합한다.
 
@@ -605,6 +653,7 @@ class AIFundManagerTask(commands.Cog):
             paper_bought:    모의 신규 매수 결과 리스트.
             is_real_active:  이번 사이클에서 실전 모드가 활성 상태였는지.
             is_paper_active: 이번 사이클에서 모의 모드가 활성 상태였는지.
+            trade_style:     "SWING" 또는 "SCALPING" — 제목/푸터에 표시.
 
         Returns:
             단일 discord.Embed 객체.
@@ -613,11 +662,11 @@ class AIFundManagerTask(commands.Cog):
         total_paper = len(paper_reviewed) + len(paper_bought)
         total       = total_real + total_paper
 
+        # ── 투자 성향 레이블 ──────────────────────────────────────────
+        style_label = "⚡ 단타 (1h 봉)" if trade_style == "SCALPING" else "📊 스윙 (4h 봉)"
+
         # ── 컬러·제목 결정 ────────────────────────────────────────────
-        if total > 0:
-            color = discord.Color.blue()
-        else:
-            color = discord.Color.greyple()
+        color = discord.Color.blue() if total > 0 else discord.Color.greyple()
 
         # ── 설명 문구 ─────────────────────────────────────────────────
         parts: list[str] = []
@@ -636,7 +685,7 @@ class AIFundManagerTask(commands.Cog):
             desc = "관망 중"
 
         embed = discord.Embed(
-            title="🤖 AI 4시간 종합 리포트",
+            title=f"🤖 AI 종합 리포트 [{style_label}]",
             description=desc,
             color=color,
         )
@@ -791,13 +840,14 @@ class AIFundManagerTask(commands.Cog):
                     inline=False,
                 )
 
-        next_time = get_next_ai_run_time()
+        # ── 푸터: 다음 실행 시각 (투자 성향 반영) ────────────────────
+        next_time = get_next_run_time_for_style(trade_style)
         footer_parts: list[str] = []
         if is_real_active:  footer_parts.append("실전")
         if is_paper_active: footer_parts.append("🎮모의")
         mode_str = " + ".join(footer_parts) if footer_parts else "AI"
         embed.set_footer(
-            text=f"{mode_str} | 익절·손절은 워커가 자동 처리 | 다음 리포트: {next_time}"
+            text=f"{mode_str} | {style_label} | 익절·손절은 워커가 자동 처리 | 다음 리포트: {next_time}"
         )
         return embed
 
