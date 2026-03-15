@@ -678,6 +678,7 @@ class AIFundManagerTask(commands.Cog):
 
             # ── 비중 기반 매수 금액 산출 ──────────────────────────────
             trade_amount = available_krw * (weight_pct / 100.0)
+            safe_trade_amount = trade_amount  # 실거래 else 블록에서 덮어씀
             if trade_amount < 5_000:
                 logger.info(
                     "비중 기반 매수 금액 미달 스킵 (%.0f KRW < 5,000): "
@@ -760,12 +761,22 @@ class AIFundManagerTask(commands.Cog):
 
                 else:
                     # ── 실거래: 업비트 시장가 매수 API 호출 ───────────
-                    order      = await exchange.create_market_buy_order(symbol, trade_amount)
+                    # 수수료(0.05%) 및 슬리피지 버퍼 0.1% 차감 후 정수화
+                    safe_trade_amount = int(trade_amount * 0.999)
+                    if safe_trade_amount < 5_000:
+                        logger.info(
+                            "수수료 버퍼 적용 후 최소 주문 금액 미달 스킵 "
+                            "(%d KRW < 5,000): user_id=%s symbol=%s",
+                            safe_trade_amount, user_id, symbol,
+                        )
+                        continue
+
+                    order      = await exchange.create_market_buy_order(symbol, safe_trade_amount)
                     filled_qty = float(order.get("filled") or 0)
                     order_cost = float(order.get("cost") or 0)
 
                     # 체결 수량: API 응답 우선, 없으면 현재가 기준 추정
-                    amount_coin = filled_qty if filled_qty > 0 else (trade_amount / current_price)
+                    amount_coin = filled_qty if filled_qty > 0 else (safe_trade_amount / current_price)
 
                     # 평균 체결가 산출 (정확도 우선순위):
                     #  1) cost ÷ filled  — 실제 체결 데이터 기준 가장 정확
@@ -791,7 +802,7 @@ class AIFundManagerTask(commands.Cog):
                     setting = BotSetting(
                         user_id=user_id,
                         symbol=symbol,
-                        buy_amount_krw=trade_amount,
+                        buy_amount_krw=safe_trade_amount,
                         target_profit_pct=target_profit,
                         stop_loss_pct=stop_loss,
                         is_running=True,
@@ -809,7 +820,7 @@ class AIFundManagerTask(commands.Cog):
                     setting_id=setting.id,
                     user_id=user_id,
                     symbol=symbol,
-                    buy_amount_krw=trade_amount,
+                    buy_amount_krw=safe_trade_amount,
                     target_profit_pct=target_profit,
                     stop_loss_pct=stop_loss,
                     exchange=None if is_paper_mode else exchange,
@@ -829,7 +840,7 @@ class AIFundManagerTask(commands.Cog):
                         "stop_loss_pct":     stop_loss,
                         "score":             score,
                         "weight_pct":        weight_pct,
-                        "trade_amount":      trade_amount,
+                        "trade_amount":      safe_trade_amount,
                     }
                 )
                 slots_used += 1
@@ -838,7 +849,7 @@ class AIFundManagerTask(commands.Cog):
                     "score=%d weight=%.1f%% trade_amount=%.0f",
                     "[모의] " if is_paper_mode else "",
                     user_id, symbol, buy_price, amount_coin,
-                    score, weight_pct, trade_amount,
+                    score, weight_pct, safe_trade_amount,
                 )
 
             except Exception as exc:
