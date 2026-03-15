@@ -102,6 +102,14 @@ class User(Base):
     #               매수 시 차감, 매도 시 체결 대금 합산.
     virtual_krw: Mapped[float] = mapped_column(Float, default=10_000_000.0)
 
+    # ── AI 전용 운용 예산 및 연착륙 플래그 ───────────────────────────
+    # ai_budget_krw      : AI 펀드 매니저가 최대로 투자할 수 있는 예산 (KRW).
+    #                      0이면 예산 제한 없음(업비트 실제 잔고 전액 사용).
+    # ai_is_shutting_down: True이면 연착륙 진행 중 — 신규 매수를 중단하고
+    #                      기존 포지션이 모두 청산되면 ai_mode_enabled=False 로 자동 전환.
+    ai_budget_krw: Mapped[float] = mapped_column(Float, default=0.0)
+    ai_is_shutting_down: Mapped[bool] = mapped_column(Boolean, default=False)
+
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")
     trade_histories: Mapped[list["TradeHistory"]] = relationship(

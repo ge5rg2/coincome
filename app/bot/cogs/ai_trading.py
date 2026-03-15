@@ -22,7 +22,9 @@ from discord.ext import commands
 from sqlalchemy import select
 
 from app.database import AsyncSessionLocal
+from app.models.bot_setting import BotSetting
 from app.models.user import SubscriptionTier, User
+from app.services.trading_worker import WorkerRegistry
 from app.utils.time import get_next_run_time_for_style
 
 logger = logging.getLogger(__name__)
@@ -149,6 +151,7 @@ class AISettingView(discord.ui.View):
             style=self.style_value,
             current_amount=int(self._user.ai_trade_amount),
             current_max_coins=self._user.ai_max_coins,
+            current_budget=int(getattr(self._user, "ai_budget_krw", 0)),
         )
         await interaction.response.send_modal(modal)
 
@@ -177,6 +180,7 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
         style: str,
         current_amount: int,
         current_max_coins: int,
+        current_budget: int = 0,
     ) -> None:
         super().__init__()
         self._user_id = user_id
@@ -197,8 +201,17 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             max_length=2,
             default=str(current_max_coins),
         )
+        self.budget = discord.ui.TextInput(
+            label="AI 전체 운용 예산 (KRW, 0 = 제한 없음)",
+            placeholder="예: 500000  (0 입력 시 잔고 전액 사용)",
+            min_length=1,
+            max_length=12,
+            required=False,
+            default=str(current_budget),
+        )
         self.add_item(self.trade_amount)
         self.add_item(self.max_coins)
+        self.add_item(self.budget)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -234,6 +247,22 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             )
             return
 
+        # ── 운용 예산 검증 ─────────────────────────────────────────────
+        try:
+            budget_raw = (self.budget.value or "0").replace(",", "").strip()
+            budget = int(budget_raw) if budget_raw else 0
+        except ValueError:
+            await interaction.followup.send(
+                "❌ 운용 예산은 숫자로 입력해 주세요. (0 입력 시 제한 없음)", ephemeral=True
+            )
+            return
+
+        if budget < 0:
+            await interaction.followup.send(
+                "❌ 운용 예산은 **0 이상**이어야 합니다. (0 입력 시 잔고 전액 사용)", ephemeral=True
+            )
+            return
+
         enabled = self._mode == "ON"
 
         # ── DB 업데이트 ───────────────────────────────────────────────
@@ -249,11 +278,13 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             user.ai_trade_amount = amount
             user.ai_max_coins = max_coins
             user.ai_trade_style = self._style
+            user.ai_budget_krw = float(budget)
+            user.ai_is_shutting_down = False  # 설정 변경 시 종료 모드 초기화
             await db.commit()
 
         logger.info(
-            "AI 실전 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d style=%s",
-            self._user_id, enabled, amount, max_coins, self._style,
+            "AI 실전 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d style=%s budget=%d",
+            self._user_id, enabled, amount, max_coins, self._style, budget,
         )
 
         # ── 완료 Embed 반환 ───────────────────────────────────────────
@@ -267,6 +298,8 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
         embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
         embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
         embed.add_field(name="투자 성향", value=style_label, inline=True)
+        budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
+        embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
 
         if enabled:
             next_time = get_next_run_time_for_style(self._style)
@@ -278,6 +311,158 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
         else:
             embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
 
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ------------------------------------------------------------------
+# AI 종료 View (연착륙 / 즉시 종료 버튼)
+# ------------------------------------------------------------------
+
+
+class AIShutdownView(discord.ui.View):
+    """AI 펀드 매니저 종료 방식을 선택하는 View.
+
+    timeout=60초 후 버튼 자동 비활성화.
+
+    Attributes:
+        _user_id: 종료 요청 Discord 사용자 ID.
+    """
+
+    def __init__(self, user_id: str) -> None:
+        super().__init__(timeout=60)
+        self._user_id = user_id
+
+    async def _disable_all(self, interaction: discord.Interaction) -> None:
+        """버튼 전체를 비활성화하고 원본 메시지를 업데이트한다 (이중 클릭 방지)."""
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.edit_original_response(view=self)
+        except Exception:
+            pass
+
+    @discord.ui.button(
+        label="🟡 연착륙 (마저 팔고 종료)",
+        style=discord.ButtonStyle.secondary,
+        row=0,
+    )
+    async def graceful_stop(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        """신규 매수를 즉시 중단하고, 기존 포지션은 익절/손절 기준으로 자동 매도되기를 기다린다.
+
+        ai_is_shutting_down=True 로 설정하면 ai_manager 가 다음 사이클부터
+        analyze_market 및 _buy_new_coins 를 완전히 건너뛰고,
+        모든 포지션이 청산되면 ai_mode_enabled=False 로 자동 전환한다.
+        """
+        await interaction.response.defer(ephemeral=True)
+        await self._disable_all(interaction)
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.user_id == self._user_id))
+            db_user = result.scalar_one_or_none()
+            if db_user is None:
+                await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
+                return
+            db_user.ai_is_shutting_down = True
+            await db.commit()
+
+        logger.info("AI 연착륙 시작: user_id=%s", self._user_id)
+        embed = discord.Embed(
+            title="🟡 연착륙 시작",
+            description=(
+                "신규 매수를 **즉시 중단**했습니다.\n\n"
+                "보유 중인 코인이 모두 매도되면 AI가 완전히 종료됩니다.\n"
+                "기존 포지션은 설정한 익절/손절 기준으로 자동 매도됩니다.\n"
+                "AI 리포트는 계속 전송되며, 모든 포지션 청산 시 완료 알림이 옵니다."
+            ),
+            color=discord.Color.yellow(),
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @discord.ui.button(
+        label="🔴 즉시 종료 (전부 시장가 매도)",
+        style=discord.ButtonStyle.danger,
+        row=0,
+    )
+    async def emergency_stop(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        """현재 보유 중인 실전 AI 포지션을 즉시 시장가로 전량 매도한다.
+
+        매수 대기 중인 워커도 취소(DB 초기화)한다.
+        ai_mode_enabled=False, ai_is_shutting_down=False 로 완전 비활성화.
+        """
+        await interaction.response.defer(ephemeral=True)
+        await self._disable_all(interaction)
+
+        registry = WorkerRegistry.get()
+        # 반복 중 딕셔너리 변경 방지를 위해 먼저 복사·필터링
+        real_ai_workers = [
+            w for w in list(registry._workers.values())
+            if w.user_id == self._user_id and not w.is_paper_trading
+        ]
+
+        sold_symbols: list[str] = []
+        failed_symbols: list[str] = []
+
+        for worker in real_ai_workers:
+            try:
+                if worker._position is not None:
+                    # 포지션 보유 중 → 즉시 시장가 청산
+                    ok = await worker.force_sell("🔴 AI 즉시 종료")
+                    if ok:
+                        registry._workers.pop(worker.setting_id, None)
+                        sold_symbols.append(worker.symbol)
+                        logger.info(
+                            "AI 즉시 청산 완료: user_id=%s symbol=%s",
+                            self._user_id, worker.symbol,
+                        )
+                    else:
+                        failed_symbols.append(worker.symbol)
+                        logger.warning(
+                            "AI 즉시 청산 실패 (force_sell=False): user_id=%s symbol=%s",
+                            self._user_id, worker.symbol,
+                        )
+                else:
+                    # 아직 매수 대기 중인 워커 → 취소 + DB 초기화
+                    await registry.unregister(worker.setting_id)
+                    sold_symbols.append(f"{worker.symbol} (매수 대기 취소)")
+                    logger.info(
+                        "AI 매수 대기 워커 취소: user_id=%s symbol=%s",
+                        self._user_id, worker.symbol,
+                    )
+            except Exception as exc:
+                failed_symbols.append(worker.symbol)
+                logger.error(
+                    "AI 즉시 청산 오류: user_id=%s symbol=%s err=%s",
+                    self._user_id, worker.symbol, exc,
+                )
+
+        # DB: AI 모드 완전 비활성화
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.user_id == self._user_id))
+            db_user = result.scalar_one_or_none()
+            if db_user:
+                db_user.ai_mode_enabled = False
+                db_user.ai_is_shutting_down = False
+                await db.commit()
+
+        logger.info("AI 즉시 종료 완료: user_id=%s", self._user_id)
+
+        lines: list[str] = ["AI 실전 자동 매매가 **즉시 종료**되었습니다."]
+        if sold_symbols:
+            lines.append(f"✅ 청산·취소: {', '.join(sold_symbols)}")
+        if failed_symbols:
+            lines.append(f"⚠️ 청산 실패 (업비트에서 직접 확인): {', '.join(failed_symbols)}")
+        if not real_ai_workers:
+            lines.append("실행 중인 AI 포지션이 없었습니다.")
+
+        embed = discord.Embed(
+            title="🔴 AI 즉시 종료 완료",
+            description="\n".join(lines),
+            color=discord.Color.red(),
+        )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -338,4 +523,68 @@ class AITradingCog(commands.Cog):
         embed.set_footer(text="⏱️ 이 메시지는 3분 후 만료됩니다.")
 
         view = AISettingView(user=user)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @app_commands.command(
+        name="ai종료",
+        description="실전 AI 펀드 매니저를 종료합니다. (연착륙 또는 즉시 강제 종료)",
+    )
+    async def ai_shutdown_command(self, interaction: discord.Interaction) -> None:
+        """AI 종료 방식을 선택하는 View를 표시한다.
+
+        - VIP + ai_mode_enabled 상태인 유저만 사용 가능.
+        - 연착륙: 신규 매수 중단, 기존 포지션은 익절/손절 기준 자동 매도 후 자동 비활성화.
+        - 즉시 종료: 보유 포지션 전량 시장가 매도 후 AI 즉시 비활성화.
+        """
+        user_id = str(interaction.user.id)
+
+        async with AsyncSessionLocal() as db:
+            user_result = await db.execute(select(User).where(User.user_id == user_id))
+            user = user_result.scalar_one_or_none()
+
+            if user is None or user.subscription_tier != SubscriptionTier.VIP:
+                await interaction.response.send_message(
+                    embed=_make_vip_required_embed(), ephemeral=True
+                )
+                return
+
+            if not user.ai_mode_enabled:
+                await interaction.response.send_message(
+                    "ℹ️ AI 실전 자동 매매가 현재 **비활성화** 상태입니다.\n"
+                    "`/ai실전` 에서 먼저 AI 모드를 ON으로 설정해 주세요.",
+                    ephemeral=True,
+                )
+                return
+
+            # 현재 실행 중인 실전 AI 포지션 수 조회
+            pos_result = await db.execute(
+                select(BotSetting).where(
+                    BotSetting.user_id == user_id,
+                    BotSetting.is_running.is_(True),
+                    BotSetting.is_ai_managed.is_(True),
+                    BotSetting.is_paper_trading.is_(False),
+                )
+            )
+            ai_positions = pos_result.scalars().all()
+
+        is_shutting_down = bool(getattr(user, "ai_is_shutting_down", False))
+        position_count = len(ai_positions)
+
+        status_lines = [f"현재 실전 AI 포지션: **{position_count}개** 운용 중"]
+        if is_shutting_down:
+            status_lines.append("⚠️ 현재 **연착륙 진행 중**입니다.")
+
+        embed = discord.Embed(
+            title="⚠️ AI 펀드 매니저 종료",
+            description=(
+                "\n".join(status_lines) + "\n\n"
+                "종료 방식을 선택하세요.\n\n"
+                "🟡 **연착륙** — 신규 매수만 중단. 기존 포지션은 익절/손절 기준으로 자동 매도됩니다.\n"
+                "🔴 **즉시 종료** — 보유 포지션을 **즉시 전량 시장가 매도** 후 AI를 비활성화합니다."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="⏱️ 이 메시지는 60초 후 만료됩니다.")
+
+        view = AIShutdownView(user_id=user_id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
