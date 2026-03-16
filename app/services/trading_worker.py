@@ -79,6 +79,10 @@ class TradingWorker:
         exchange: ExchangeService | None,
         notify_callback,  # async def callback(user_id: str, msg: str)
         is_paper_trading: bool = False,
+        is_ai_managed: bool = False,
+        trade_style: str | None = None,
+        ai_score: int | None = None,
+        ai_reason: str | None = None,
     ) -> None:
         self.setting_id = setting_id
         self.user_id = user_id
@@ -89,6 +93,10 @@ class TradingWorker:
         self.exchange = exchange
         self.notify = notify_callback
         self.is_paper_trading = is_paper_trading  # True = 가상 매매, False = 실거래
+        self.is_ai_managed = is_ai_managed
+        self.trade_style = trade_style
+        self.ai_score = ai_score
+        self.ai_reason = ai_reason
 
         self._task: asyncio.Task | None = None
         self._position: Position | None = None
@@ -198,8 +206,12 @@ class TradingWorker:
         if setting is None:
             raise RuntimeError(f"BotSetting 레코드 없음: id={self.setting_id}")
 
-        # 🛡️ 강력한 방어 코드: 인스턴스 생성 시 누락되었을 수 있는 paper_trading 플래그를 DB 기준으로 강제 동기화
+        # 🛡️ 강력한 방어 코드: 인스턴스 생성 시 누락되었을 수 있는 플래그를 DB 기준으로 강제 동기화
         self.is_paper_trading = setting.is_paper_trading
+        self.is_ai_managed = setting.is_ai_managed
+        self.trade_style = setting.trade_style
+        self.ai_score = int(setting.ai_score) if setting.ai_score is not None else None
+        self.ai_reason = setting.ai_reason
 
         if setting.buy_price is not None and setting.amount_coin is not None:
             # ── 상태 복구 경로 ──────────────────────────────────────
@@ -476,6 +488,10 @@ class TradingWorker:
                     profit_krw=realized_pnl,
                     buy_amount_krw=pos.buy_amount_krw,
                     is_paper_trading=True,
+                    is_ai_managed=self.is_ai_managed,
+                    trade_style=self.trade_style,
+                    ai_score=self.ai_score,
+                    ai_reason=self.ai_reason,
                 )
                 db.add(history)
                 await db.commit()
@@ -562,6 +578,10 @@ class TradingWorker:
                 profit_krw=realized_pnl,
                 buy_amount_krw=pos.buy_amount_krw,
                 is_paper_trading=False,
+                is_ai_managed=self.is_ai_managed,
+                trade_style=self.trade_style,
+                ai_score=self.ai_score,
+                ai_reason=self.ai_reason,
             )
             db.add(history)
             await db.commit()
