@@ -19,6 +19,8 @@ MarketDataManager: AI 자동 매매를 위한 시장 데이터 캐싱 관리자.
         "price":        float,        # 현재가 (4h 마지막 봉 종가)
         "change_pct":   float | None, # 24h 변동률 (%)
         "volume_krw":   float | None, # 24h 거래대금 (KRW)
+        # ── 변동성 지표 (1h 봉 ATR 기반) ───────────────────────────
+        "atr_pct":      float | None, # (ATR14 / price) × 100 — 변동성 백분율
         # ── Swing (4h 봉) 지표 ─────────────────────────────────────
         "rsi14":        float | None, # 4h RSI(14)
         "ma20":         float | None, # 4h 20봉 이동평균
@@ -27,6 +29,10 @@ MarketDataManager: AI 자동 매매를 위한 시장 데이터 캐싱 관리자.
         "rsi14_1h":     float | None, # 1h RSI(14)
         "ma20_1h":      float | None, # 1h 20봉 이동평균
         "candles_1h":   list[dict],   # 최근 5개 1h 봉 요약
+        # ── 단기 진입 타점 (15m 봉) 지표 ───────────────────────────
+        "rsi14_15m":    float | None, # 15m RSI(14)
+        "ma20_15m":     float | None, # 15m 20봉 이동평균
+        "candles_15m":  list[dict],   # 최근 5개 15m 봉 요약
         "updated_at":   datetime,
       }, ...
     }
@@ -46,14 +52,15 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-TOP_N          = 10    # 1차 스크리닝 선택 코인 수
-CHUNK_SIZE     = 100   # fetch_tickers() 1회 호출 시 최대 심볼 수 (URL 길이 제한 방어)
-CHUNK_SLEEP    = 0.3   # 청크 간 Rate-Limit 방지 대기 (초)
+TOP_N            = 10    # 1차 스크리닝 선택 코인 수
+CHUNK_SIZE       = 100   # fetch_tickers() 1회 호출 시 최대 심볼 수 (URL 길이 제한 방어)
+CHUNK_SLEEP      = 0.3   # 청크 간 Rate-Limit 방지 대기 (초)
 REFRESH_INTERVAL = 1 * 3600  # 캐시 갱신 주기 (초) — 1h 단타 모드를 위해 1시간으로 단축
-OHLCV_LIMIT    = 60    # 4h 봉 캔들 수 (RSI14 + MA20 계산에 충분)
-OHLCV_LIMIT_1H = 60    # 1h 봉 캔들 수
-COIN_SLEEP     = 0.8   # 코인별 4h/1h 두 번 fetch 후 다음 코인으로 넘어가기 전 대기 (초)
-TF_SLEEP       = 0.3   # 동일 코인 내 4h → 1h 전환 시 Rate-Limit 방지 대기 (초)
+OHLCV_LIMIT      = 60    # 4h 봉 캔들 수 (RSI14 + MA20 계산에 충분)
+OHLCV_LIMIT_1H   = 60    # 1h 봉 캔들 수 (ATR14 계산 포함)
+OHLCV_LIMIT_15M  = 60    # 15m 봉 캔들 수 (단기 진입 타점 필터용)
+COIN_SLEEP       = 0.8   # 코인별 fetch 완료 후 다음 코인으로 넘어가기 전 대기 (초)
+TF_SLEEP         = 0.3   # 동일 코인 내 타임프레임 전환 시 Rate-Limit 방지 대기 (초)
 
 
 def _calc_rsi(close: pd.Series, period: int = 14) -> float | None:
@@ -91,6 +98,33 @@ def _calc_ma(close: pd.Series, period: int = 20) -> float | None:
         return None
     ma_series = close.rolling(period).mean()
     val = ma_series.iloc[-1]
+    return float(val) if pd.notna(val) else None
+
+
+def _calc_atr(df: pd.DataFrame, period: int = 14) -> float | None:
+    """ATR(Average True Range)을 계산해 마지막 값을 반환한다.
+
+    True Range = max(H-L, |H-prev_C|, |L-prev_C|)
+    ATR = TR의 period기간 단순 이동평균.
+
+    Args:
+        df:     OHLCV DataFrame (timestamp, open, high, low, close, volume 컬럼).
+        period: ATR 기간 (기본 14).
+
+    Returns:
+        마지막 봉의 ATR 값(가격 단위), 또는 데이터 부족 시 None.
+    """
+    if len(df) < period + 1:
+        return None
+    high       = df["high"]
+    low        = df["low"]
+    prev_close = df["close"].shift(1)
+    tr = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.rolling(period).mean()
+    val = atr.iloc[-1]
     return float(val) if pd.notna(val) else None
 
 
@@ -217,7 +251,7 @@ class MarketDataManager:
     # ------------------------------------------------------------------
 
     async def _refresh(self) -> None:
-        """전체 마켓 스크리닝 → Top N 정밀 캐싱(4h + 1h)을 순차 실행한다.
+        """전체 마켓 스크리닝 → Top N 정밀 캐싱(4h + 1h + 15m)을 순차 실행한다.
 
         비즈니스 로직:
           1. fetch_markets() 로 전체 마켓 목록 조회 → /KRW 심볼 필터링
@@ -225,8 +259,9 @@ class MarketDataManager:
           3. quoteVolume 내림차순 정렬 → 상위 TOP_N 심볼 추출
           4. 각 심볼별:
              a. 4h OHLCV → RSI14·MA20 계산 (Swing용)
-             b. 0.3초 대기 → 1h OHLCV → RSI14·MA20 계산 (Scalping용)
-             c. del df 로 메모리 즉시 해제
+             b. 0.3초 대기 → 1h OHLCV → RSI14·MA20·ATR14·ATR% 계산 (Scalping + 변동성)
+             c. 0.3초 대기 → 15m OHLCV → RSI14·MA20 계산 (단기 진입 타점 필터)
+             d. del df 로 메모리 즉시 해제
           5. 결과를 self._cache 에 반영 (원자적 교체)
         """
         loop = asyncio.get_event_loop()
@@ -338,7 +373,7 @@ class MarketDataManager:
                 # ── Rate-Limit 방지 대기 (4h → 1h 전환) ────────────────
                 await asyncio.sleep(TF_SLEEP)
 
-                # ── (B) 1h 봉 OHLCV (Scalping 지표) ───────────────────
+                # ── (B) 1h 봉 OHLCV (Scalping 지표 + ATR 변동성) ──────
                 fetch_1h = partial(
                     self._exchange.fetch_ohlcv,
                     symbol, "1h", None, OHLCV_LIMIT_1H,
@@ -350,35 +385,72 @@ class MarketDataManager:
                         ohlcv_1h,
                         columns=["timestamp", "open", "high", "low", "close", "volume"],
                     )
-                    close1      = df1["close"]
-                    rsi14_1h    = _calc_rsi(close1, 14)
-                    ma20_1h     = _calc_ma(close1, 20)
-                    candles_1h  = _ohlcv_to_candles(ohlcv_1h)
+                    close1     = df1["close"]
+                    rsi14_1h   = _calc_rsi(close1, 14)
+                    ma20_1h    = _calc_ma(close1, 20)
+                    candles_1h = _ohlcv_to_candles(ohlcv_1h)
+                    # ATR% = (ATR14 / 현재가) × 100 — 변동성 백분율
+                    atr_val    = _calc_atr(df1, 14)
+                    atr_pct    = (atr_val / price * 100) if (atr_val and price > 0) else None
                     del df1
                 else:
                     logger.warning("1h OHLCV 데이터 없음: %s", symbol)
                     rsi14_1h   = None
                     ma20_1h    = None
                     candles_1h = []
+                    atr_pct    = None
 
                 entry.update({
+                    "atr_pct":    atr_pct,
                     "rsi14_1h":   rsi14_1h,
                     "ma20_1h":    ma20_1h,
                     "candles_1h": candles_1h,
-                    "updated_at": datetime.now(timezone.utc),
+                })
+
+                # ── Rate-Limit 방지 대기 (1h → 15m 전환) ────────────────
+                await asyncio.sleep(TF_SLEEP)
+
+                # ── (C) 15m 봉 OHLCV (단기 진입 타점 필터) ───────────
+                fetch_15m = partial(
+                    self._exchange.fetch_ohlcv,
+                    symbol, "15m", None, OHLCV_LIMIT_15M,
+                )
+                ohlcv_15m: list[list] = await loop.run_in_executor(None, fetch_15m)
+
+                if ohlcv_15m:
+                    df15 = pd.DataFrame(
+                        ohlcv_15m,
+                        columns=["timestamp", "open", "high", "low", "close", "volume"],
+                    )
+                    close15      = df15["close"]
+                    rsi14_15m    = _calc_rsi(close15, 14)
+                    ma20_15m     = _calc_ma(close15, 20)
+                    candles_15m  = _ohlcv_to_candles(ohlcv_15m)
+                    del df15
+                else:
+                    logger.warning("15m OHLCV 데이터 없음: %s", symbol)
+                    rsi14_15m    = None
+                    ma20_15m     = None
+                    candles_15m  = []
+
+                entry.update({
+                    "rsi14_15m":   rsi14_15m,
+                    "ma20_15m":    ma20_15m,
+                    "candles_15m": candles_15m,
+                    "updated_at":  datetime.now(timezone.utc),
                 })
 
                 new_cache[symbol] = entry
 
                 logger.info(
-                    "캐싱 완료: %-10s  가격=%s  "
-                    "RSI4h=%.1f  MA4h=%.0f  |  RSI1h=%.1f  MA1h=%.0f",
+                    "캐싱 완료: %-10s  가격=%s  ATR%%=%.2f  "
+                    "RSI4h=%.1f  |  RSI1h=%.1f  |  RSI15m=%.1f",
                     symbol,
                     f"{price:,.0f}",
-                    rsi14    if rsi14    is not None else float("nan"),
-                    ma20     if ma20     is not None else float("nan"),
-                    rsi14_1h if rsi14_1h is not None else float("nan"),
-                    ma20_1h  if ma20_1h  is not None else float("nan"),
+                    atr_pct   if atr_pct   is not None else float("nan"),
+                    rsi14     if rsi14     is not None else float("nan"),
+                    rsi14_1h  if rsi14_1h  is not None else float("nan"),
+                    rsi14_15m if rsi14_15m is not None else float("nan"),
                 )
 
             except Exception as exc:
@@ -392,6 +464,6 @@ class MarketDataManager:
         self._top_symbols = top_symbols
 
         logger.info(
-            "MarketDataManager 캐시 갱신 완료: %d 개 코인 (4h+1h 지표 포함)",
+            "MarketDataManager 캐시 갱신 완료: %d 개 코인 (4h+1h+15m+ATR 지표 포함)",
             len(new_cache),
         )
