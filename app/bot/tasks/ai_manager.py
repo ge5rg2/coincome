@@ -408,6 +408,7 @@ class AIFundManagerTask(commands.Cog):
                 is_paper_mode=False,
                 available_krw=real_available_krw,
                 max_slots=real_slots,
+                trade_style=trade_style,
             )
         elif is_real_active and real_slots <= 0:
             logger.info(
@@ -430,6 +431,7 @@ class AIFundManagerTask(commands.Cog):
                 is_paper_mode=True,
                 available_krw=paper_available_krw,
                 max_slots=paper_slots,
+                trade_style=trade_style,
             )
         elif is_paper_active and paper_slots <= 0:
             logger.info(
@@ -605,6 +607,7 @@ class AIFundManagerTask(commands.Cog):
         is_paper_mode: bool = False,
         available_krw: float = 0.0,
         max_slots: int = 0,
+        trade_style: str = "SWING",
     ) -> None:
         """AI가 선정한 신규 종목을 매수(실거래) 또는 가상 체결(모의투자)하고 워커를 등록한다.
 
@@ -810,6 +813,9 @@ class AIFundManagerTask(commands.Cog):
                         amount_coin=amount_coin,
                         is_paper_trading=is_paper_mode,   # ← 모의/실전 격리 플래그
                         is_ai_managed=True,                # ← 수동 봇과의 격리 플래그
+                        trade_style=trade_style,           # ← AI 메타데이터
+                        ai_score=score,
+                        ai_reason=pick.get("reason"),
                     )
                     db.add(setting)
                     await db.commit()
