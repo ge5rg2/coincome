@@ -27,6 +27,7 @@ from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
 from app.models.trade_history import TradeHistory
 from app.models.user import SubscriptionTier, User
+from app.services.exchange import ExchangeService
 from app.services.trading_worker import WorkerRegistry
 from app.services.websocket import UpbitWebsocketManager
 from app.utils.format import format_krw_price
@@ -36,6 +37,12 @@ logger = logging.getLogger(__name__)
 
 # 모의투자 초기 가상 잔고 (표시·초기화 전용 — 실제 기본값은 User.virtual_krw 에 저장)
 _INITIAL_VIRTUAL_KRW = 10_000_000.0
+
+
+def _portfolio_bar(coin_pct: float, total: int = 10) -> str:
+    """코인 비중을 10칸 블록 바로 반환한다. 예: '████░░░░░░'"""
+    filled = min(total, max(0, round(coin_pct / 100 * total)))
+    return "█" * filled + "░" * (total - filled)
 
 
 # ------------------------------------------------------------------
@@ -422,19 +429,18 @@ class PaperTradingCog(commands.Cog):
         """AI 매매 성과 리포트 Embed를 전송한다.
 
         렌더링 정책:
-          - VIP + ai_mode_enabled=True: [실전 AI 통계] + [모의투자 통계]
-          - 그 외(또는 실전 기록 없음): [모의투자 통계]만 표시
+          - is_real_active (VIP + ai_mode_enabled): [실전 AI 통계] 섹션 렌더링
+          - is_paper_active (ai_paper_mode_enabled) OR 모의 데이터 존재: [모의투자 통계] 섹션 렌더링
+          - 둘 다 활성: 구분선(━━━)으로 분리해 단일 Embed에 모두 표시
 
-        조회 항목:
-          실전) TradeHistory(is_paper=False) + BotSetting(is_running, is_paper=False, is_ai_managed=True)
-          모의) TradeHistory(is_paper=True)  + BotSetting(is_running, is_paper=True)
-               + User.virtual_krw
+        잔고 계산 기준:
+          실전) 총자산 = 업비트 KRW 잔고 + 보유 코인 현재 평가금액 합계
+          모의) 총자산 = virtual_krw + 보유 코인 매수 원금 + 미실현 손익
         """
         await interaction.response.defer(ephemeral=True)
         user_id = str(interaction.user.id)
 
         async with AsyncSessionLocal() as db:
-            # ── 유저 조회 ─────────────────────────────────────────────
             user_result = await db.execute(select(User).where(User.user_id == user_id))
             user = user_result.scalar_one_or_none()
 
@@ -446,17 +452,17 @@ class PaperTradingCog(commands.Cog):
                 )
                 return
 
-            # ── 실전 AI 섹션 표시 여부 결정 ───────────────────────────
-            show_real = (
+            is_real_active = (
                 user.subscription_tier == SubscriptionTier.VIP
                 and user.ai_mode_enabled
             )
+            is_paper_active = bool(user.ai_paper_mode_enabled)
 
-            # ── 실전 데이터 조회 (VIP + ai_mode_enabled 시에만) ───────
+            # ── 실전 데이터 조회 ───────────────────────────────────────
             real_histories: list[TradeHistory] = []
             real_open: list[BotSetting] = []
-            if show_real:
-                real_hist_result = await db.execute(
+            if is_real_active:
+                rh = await db.execute(
                     select(TradeHistory)
                     .where(
                         TradeHistory.user_id == user_id,
@@ -464,9 +470,9 @@ class PaperTradingCog(commands.Cog):
                     )
                     .order_by(desc(TradeHistory.created_at))
                 )
-                real_histories = real_hist_result.scalars().all()
+                real_histories = rh.scalars().all()
 
-                real_open_result = await db.execute(
+                ro = await db.execute(
                     select(BotSetting).where(
                         BotSetting.user_id == user_id,
                         BotSetting.is_running.is_(True),
@@ -474,10 +480,10 @@ class PaperTradingCog(commands.Cog):
                         BotSetting.is_ai_managed.is_(True),
                     )
                 )
-                real_open = real_open_result.scalars().all()
+                real_open = ro.scalars().all()
 
-            # ── 모의투자 데이터 조회 (항상) ───────────────────────────
-            paper_hist_result = await db.execute(
+            # ── 모의 데이터 조회 (항상) ───────────────────────────────
+            ph = await db.execute(
                 select(TradeHistory)
                 .where(
                     TradeHistory.user_id == user_id,
@@ -485,21 +491,22 @@ class PaperTradingCog(commands.Cog):
                 )
                 .order_by(desc(TradeHistory.created_at))
             )
-            paper_histories: list[TradeHistory] = paper_hist_result.scalars().all()
+            paper_histories: list[TradeHistory] = ph.scalars().all()
 
-            paper_open_result = await db.execute(
+            po = await db.execute(
                 select(BotSetting).where(
                     BotSetting.user_id == user_id,
                     BotSetting.is_running.is_(True),
                     BotSetting.is_paper_trading.is_(True),
                 )
             )
-            paper_open: list[BotSetting] = paper_open_result.scalars().all()
+            paper_open: list[BotSetting] = po.scalars().all()
 
         ws_manager = UpbitWebsocketManager.get()
-        virtual_krw = float(user.virtual_krw)
 
-        # ── 실전 통계 계산 ────────────────────────────────────────────
+        # ════════════════════════════════════════════════════════════
+        # 실전 통계 계산
+        # ════════════════════════════════════════════════════════════
         real_total = len(real_histories)
         real_wins = sum(1 for h in real_histories if h.profit_pct > 0)
         real_win_rate = real_wins / real_total * 100 if real_total > 0 else 0.0
@@ -507,38 +514,119 @@ class PaperTradingCog(commands.Cog):
         real_total_invested = sum(h.buy_amount_krw for h in real_histories)
         real_cum_pct = (
             real_total_pnl / real_total_invested * 100
-            if real_total_invested > 0
-            else 0.0
+            if real_total_invested > 0 else 0.0
         )
 
-        # ── 모의 통계 계산 ────────────────────────────────────────────
+        # 실전 총자산 = 업비트 KRW 잔고 + 보유 코인 현재 평가금액
+        actual_krw = 0.0
+        if is_real_active and user.upbit_access_key and user.upbit_secret_key:
+            try:
+                _exchange = ExchangeService(
+                    access_key=user.upbit_access_key,
+                    secret_key=user.upbit_secret_key,
+                )
+                actual_krw = await _exchange.fetch_krw_balance()
+            except Exception as exc:
+                logger.warning(
+                    "실전 KRW 잔고 조회 실패: user_id=%s err=%s", user_id, exc
+                )
+
+        real_coin_value = 0.0
+        real_open_lines: list[str] = []
+        for s in real_open:
+            current_price = ws_manager.get_price(s.symbol)
+            if s.buy_price is not None and current_price is not None:
+                pct = (current_price - float(s.buy_price)) / float(s.buy_price) * 100
+                coin_val = current_price * float(s.amount_coin or 0)
+                real_coin_value += coin_val
+                icon = "🟢" if pct >= 0 else "🔴"
+                real_open_lines.append(
+                    f"{icon} **{s.symbol}** | "
+                    f"{format_krw_price(float(s.buy_price))} → "
+                    f"{format_krw_price(current_price)} KRW | **{pct:+.2f}%**"
+                )
+            elif s.buy_price is None:
+                real_open_lines.append(f"⏳ **{s.symbol}** | 매수 대기 중...")
+            else:
+                real_open_lines.append(f"❓ **{s.symbol}** | 시세 수신 대기 중...")
+
+        real_total_asset = actual_krw + real_coin_value
+        real_coin_pct = (
+            real_coin_value / real_total_asset * 100
+        ) if real_total_asset > 0 else 0.0
+
+        # ════════════════════════════════════════════════════════════
+        # 모의 통계 계산
+        # ════════════════════════════════════════════════════════════
+        virtual_krw = float(user.virtual_krw)
         paper_total = len(paper_histories)
         paper_wins = sum(1 for h in paper_histories if h.profit_pct > 0)
         paper_win_rate = paper_wins / paper_total * 100 if paper_total > 0 else 0.0
-        paper_total_pnl = sum(h.profit_krw for h in paper_histories)
-        paper_total_invested = sum(h.buy_amount_krw for h in paper_histories)
+        paper_total_pnl_closed = sum(h.profit_krw for h in paper_histories)
+        paper_total_invested_closed = sum(h.buy_amount_krw for h in paper_histories)
         paper_cum_pct = (
-            paper_total_pnl / paper_total_invested * 100
-            if paper_total_invested > 0
-            else 0.0
+            paper_total_pnl_closed / paper_total_invested_closed * 100
+            if paper_total_invested_closed > 0 else 0.0
         )
-        balance_change = virtual_krw - _INITIAL_VIRTUAL_KRW
 
-        # ── Embed 구성 ────────────────────────────────────────────────
-        # 컬러: 가상 잔고 손익 기준
-        pnl_color = discord.Color.green() if balance_change >= 0 else discord.Color.red()
-        title = (
-            "📊 AI 매매 성과 리포트"
-            if show_real
-            else "📊 AI 모의투자 성과 리포트"
-        )
-        embed = discord.Embed(title=title, color=pnl_color)
+        # 보유 코인 매수 원금 + 미실현 손익 계산
+        paper_coin_invested = 0.0
+        paper_unrealized_pnl = 0.0
+        paper_open_lines: list[str] = []
+        for s in paper_open:
+            current_price = ws_manager.get_price(s.symbol)
+            paper_coin_invested += float(s.buy_amount_krw or 0)
+            if s.buy_price is not None and current_price is not None:
+                pct = (current_price - float(s.buy_price)) / float(s.buy_price) * 100
+                pnl = (current_price - float(s.buy_price)) * float(s.amount_coin or 0)
+                paper_unrealized_pnl += pnl
+                icon = "🟢" if pct >= 0 else "🔴"
+                paper_open_lines.append(
+                    f"{icon} **{s.symbol}**\n"
+                    f"  매수: {format_krw_price(float(s.buy_price))} → "
+                    f"현재: {format_krw_price(current_price)} KRW"
+                    f" | **{pct:+.2f}%** ({pnl:+,.0f} KRW)"
+                )
+            elif s.buy_price is None:
+                paper_open_lines.append(f"⏳ **{s.symbol}** | 매수 대기 중...")
+            else:
+                paper_open_lines.append(f"❓ **{s.symbol}** | 시세 수신 대기 중...")
+
+        # 모의 총자산 = 현금 잔고 + 코인 매수 원금 + 미실현 손익
+        paper_total_asset = virtual_krw + paper_coin_invested + paper_unrealized_pnl
+        paper_balance_change = paper_total_asset - _INITIAL_VIRTUAL_KRW
+        paper_coin_pct = (
+            paper_coin_invested / paper_total_asset * 100
+        ) if paper_total_asset > 0 else 0.0
+
+        # ── Embed 색상·제목 ───────────────────────────────────────────
+        if is_real_active:
+            pnl_ref = real_total_pnl
+        else:
+            pnl_ref = paper_balance_change
+        pnl_color = discord.Color.green() if pnl_ref >= 0 else discord.Color.red()
+        embed = discord.Embed(title="📊 AI 매매 성과 리포트", color=pnl_color)
+
+        show_paper = is_paper_active or bool(paper_histories or paper_open)
 
         # ════════════════════════════════════════════════════════════
-        # 실전 AI 섹션 (VIP + ai_mode_enabled 시에만)
+        # 실전 AI 섹션
         # ════════════════════════════════════════════════════════════
-        if show_real:
-            # 실전 완료 거래 요약
+        if is_real_active:
+            # 포트폴리오 비중 차트
+            bar = _portfolio_bar(real_coin_pct)
+            embed.add_field(
+                name="👑 실전 AI — 포트폴리오 현황",
+                value=(
+                    f"📊 포트폴리오 비중\n"
+                    f"[{bar}] 코인 {real_coin_pct:.0f}% | 현금 {100 - real_coin_pct:.0f}%\n"
+                    f"💰 AI 운용 총자산: **{real_total_asset:,.0f} KRW**\n"
+                    f"  현금: {actual_krw:,.0f} KRW | 코인 평가액: {real_coin_value:,.0f} KRW"
+                ),
+                inline=False,
+            )
+
+            # 완료 거래 요약
             if real_total > 0:
                 real_stats_value = (
                     f"총 거래: **{real_total}회** | "
@@ -548,34 +636,13 @@ class PaperTradingCog(commands.Cog):
                 )
             else:
                 real_stats_value = "아직 실전 AI 거래 이력이 없습니다."
+            embed.add_field(name="👑 실전 AI 완료 거래", value=real_stats_value, inline=False)
 
-            embed.add_field(
-                name="👑 실전 AI 완료 거래",
-                value=real_stats_value,
-                inline=False,
-            )
-
-            # 현재 실전 오픈 포지션
-            if real_open:
-                real_lines: list[str] = []
-                for s in real_open:
-                    current_price = ws_manager.get_price(s.symbol)
-                    if s.buy_price is not None and current_price is not None:
-                        pct = (current_price - float(s.buy_price)) / float(s.buy_price) * 100
-                        icon = "🟢" if pct >= 0 else "🔴"
-                        real_lines.append(
-                            f"{icon} **{s.symbol}** | "
-                            f"{format_krw_price(float(s.buy_price))} → "
-                            f"{format_krw_price(current_price)} KRW"
-                            f" | **{pct:+.2f}%**"
-                        )
-                    elif s.buy_price is None:
-                        real_lines.append(f"⏳ **{s.symbol}** | 매수 대기 중...")
-                    else:
-                        real_lines.append(f"❓ **{s.symbol}** | 시세 수신 대기 중...")
+            # 진행 중인 실전 포지션
+            if real_open_lines:
                 embed.add_field(
                     name=f"💼 실전 진행 중 ({len(real_open)}건)",
-                    value="\n".join(real_lines),
+                    value="\n".join(real_open_lines),
                     inline=False,
                 )
             else:
@@ -585,7 +652,7 @@ class PaperTradingCog(commands.Cog):
                     inline=False,
                 )
 
-            # 최근 실전 거래 (최대 3건)
+            # 최근 실전 거래 3건
             if real_histories:
                 rec_lines: list[str] = []
                 for h in real_histories[:3]:
@@ -603,104 +670,95 @@ class PaperTradingCog(commands.Cog):
                     inline=False,
                 )
 
-            # 구분선 (모의투자 섹션이 이어짐)
-            embed.add_field(
-                name="━━━━━━━━━━━━━━━━━━━━━━",
-                value="\u200b",
-                inline=False,
-            )
-
-        # ════════════════════════════════════════════════════════════
-        # 모의투자 섹션 (항상 표시)
-        # ════════════════════════════════════════════════════════════
-
-        # 1) 가상 잔고 현황
-        balance_icon = "📈" if balance_change >= 0 else "📉"
-        embed.add_field(
-            name="🎮 모의투자 가상 잔고",
-            value=(
-                f"**{virtual_krw:,.0f} KRW**\n"
-                f"{balance_icon} 초기 대비: **{balance_change:+,.0f} KRW**\n"
-                f"_(초기 잔고: {_INITIAL_VIRTUAL_KRW:,.0f} KRW)_"
-            ),
-            inline=True,
-        )
-
-        # 2) 모의 누적 성과
-        if paper_total > 0:
-            paper_stats_value = (
-                f"총 거래: **{paper_total}회**\n"
-                f"승/패: **{paper_wins}승 {paper_total - paper_wins}패**\n"
-                f"승률: **{paper_win_rate:.1f}%**\n"
-                f"누적 손익: **{paper_total_pnl:+,.0f} KRW** ({paper_cum_pct:+.2f}%)"
-            )
-        else:
-            paper_stats_value = "아직 완료된 모의 거래가 없습니다."
-
-        embed.add_field(name="🎮 모의 완료 거래 성과", value=paper_stats_value, inline=True)
-
-        # 3) 현재 진행 중인 모의 오픈 포지션 + 미실현 손익
-        if paper_open:
-            paper_lines: list[str] = []
-            unrealized_pnl = 0.0
-            for s in paper_open:
-                current_price = ws_manager.get_price(s.symbol)
-                if s.buy_price is not None and current_price is not None:
-                    pct = (current_price - float(s.buy_price)) / float(s.buy_price) * 100
-                    pnl = (current_price - float(s.buy_price)) * float(s.amount_coin or 0)
-                    unrealized_pnl += pnl
-                    icon = "🟢" if pct >= 0 else "🔴"
-                    paper_lines.append(
-                        f"{icon} **{s.symbol}**\n"
-                        f"  매수: {format_krw_price(float(s.buy_price))} → "
-                        f"현재: {format_krw_price(current_price)} KRW"
-                        f" | **{pct:+.2f}%** ({pnl:+,.0f} KRW)"
-                    )
-                elif s.buy_price is None:
-                    paper_lines.append(f"⏳ **{s.symbol}** | 매수 대기 중...")
-                else:
-                    paper_lines.append(f"❓ **{s.symbol}** | 시세 수신 대기 중...")
-            unrealized_str = f"\n\n미실현 손익 합계: **{unrealized_pnl:+,.0f} KRW**"
-            embed.add_field(
-                name=f"👀 현재 진행 중인 모의투자 ({len(paper_open)}건)",
-                value="\n".join(paper_lines) + unrealized_str,
-                inline=False,
-            )
-        else:
-            embed.add_field(
-                name="👀 현재 진행 중인 모의투자",
-                value=(
-                    "현재 보유 중인 모의 포지션이 없습니다.\n"
-                    "AI 스케줄러가 다음 실행 시 종목을 선정합니다."
-                ),
-                inline=False,
-            )
-
-        # 4) 최근 모의 완료 거래 (최대 5건)
-        if paper_histories:
-            rec_lines_paper: list[str] = []
-            for h in paper_histories[:5]:
-                icon = "🟢" if h.profit_pct > 0 else "🔴"
-                date_str = h.created_at.strftime("%m/%d %H:%M") if h.created_at else "-"
-                rec_lines_paper.append(
-                    f"{icon} **{h.symbol}** `{date_str}`\n"
-                    f"  {format_krw_price(h.buy_price)} → "
-                    f"{format_krw_price(h.sell_price)} KRW"
-                    f" | **{h.profit_pct:+.2f}%** ({h.profit_krw:+,.0f} KRW)"
+            # 모의 섹션이 이어질 경우 구분선
+            if show_paper:
+                embed.add_field(
+                    name="━━━━━━━━━━━━━━━━━━━━━━",
+                    value="\u200b",
+                    inline=False,
                 )
+
+        # ════════════════════════════════════════════════════════════
+        # 모의투자 섹션
+        # ════════════════════════════════════════════════════════════
+        if show_paper:
+            balance_icon = "📈" if paper_balance_change >= 0 else "📉"
+            bar = _portfolio_bar(paper_coin_pct)
             embed.add_field(
-                name="📋 최근 모의 거래 기록 (최대 5건)",
-                value="\n".join(rec_lines_paper),
-                inline=False,
-            )
-        else:
-            embed.add_field(
-                name="📋 최근 모의 거래 기록",
+                name="🎮 모의투자 — 포트폴리오 현황",
                 value=(
-                    "아직 완료된 모의 거래가 없습니다.\n"
-                    "`/ai모의`를 ON 으로 설정하고 AI 스케줄러를 기다리세요!"
+                    f"📊 포트폴리오 비중\n"
+                    f"[{bar}] 코인 {paper_coin_pct:.0f}% | 현금 {100 - paper_coin_pct:.0f}%\n"
+                    f"💰 총 보유 자산: **{paper_total_asset:,.0f} KRW**"
+                    f"  {balance_icon} 초기 대비: **{paper_balance_change:+,.0f} KRW**\n"
+                    f"  현금: {virtual_krw:,.0f} | 코인 원금: {paper_coin_invested:,.0f}"
+                    f" | 미실현: {paper_unrealized_pnl:+,.0f} KRW"
                 ),
                 inline=False,
+            )
+
+            # 완료 거래 요약
+            if paper_total > 0:
+                paper_stats_value = (
+                    f"총 거래: **{paper_total}회**\n"
+                    f"승/패: **{paper_wins}승 {paper_total - paper_wins}패**\n"
+                    f"승률: **{paper_win_rate:.1f}%**\n"
+                    f"누적 손익: **{paper_total_pnl_closed:+,.0f} KRW**"
+                    f" ({paper_cum_pct:+.2f}%)"
+                )
+            else:
+                paper_stats_value = "아직 완료된 모의 거래가 없습니다."
+            embed.add_field(name="🎮 모의 완료 거래 성과", value=paper_stats_value, inline=True)
+
+            # 진행 중인 모의 포지션 + 미실현 손익 합계
+            if paper_open_lines:
+                embed.add_field(
+                    name=f"👀 현재 진행 중인 모의투자 ({len(paper_open)}건)",
+                    value="\n".join(paper_open_lines)
+                    + f"\n\n미실현 손익 합계: **{paper_unrealized_pnl:+,.0f} KRW**",
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name="👀 현재 진행 중인 모의투자",
+                    value=(
+                        "현재 보유 중인 모의 포지션이 없습니다.\n"
+                        "AI 스케줄러가 다음 실행 시 종목을 선정합니다."
+                    ),
+                    inline=False,
+                )
+
+            # 최근 모의 거래 5건
+            if paper_histories:
+                rec_lines_paper: list[str] = []
+                for h in paper_histories[:5]:
+                    icon = "🟢" if h.profit_pct > 0 else "🔴"
+                    date_str = h.created_at.strftime("%m/%d %H:%M") if h.created_at else "-"
+                    rec_lines_paper.append(
+                        f"{icon} **{h.symbol}** `{date_str}`\n"
+                        f"  {format_krw_price(h.buy_price)} → "
+                        f"{format_krw_price(h.sell_price)} KRW"
+                        f" | **{h.profit_pct:+.2f}%** ({h.profit_krw:+,.0f} KRW)"
+                    )
+                embed.add_field(
+                    name="📋 최근 모의 거래 기록 (최대 5건)",
+                    value="\n".join(rec_lines_paper),
+                    inline=False,
+                )
+            else:
+                embed.add_field(
+                    name="📋 최근 모의 거래 기록",
+                    value=(
+                        "아직 완료된 모의 거래가 없습니다.\n"
+                        "`/ai모의`를 ON 으로 설정하고 AI 스케줄러를 기다리세요!"
+                    ),
+                    inline=False,
+                )
+
+        if not is_real_active and not show_paper:
+            embed.description = (
+                "활성화된 AI 투자 모드가 없습니다.\n"
+                "`/ai모의` 또는 `/ai실전`을 사용해 시작하세요."
             )
 
         embed.set_footer(
