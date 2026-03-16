@@ -45,6 +45,10 @@ jobs:
             docker-compose run --rm app python -m scripts.add_ai_trade_style_column
             docker-compose run --rm app python -m scripts.add_ai_budget_shutdown_columns
 
+            # 3) AI 메타데이터 컬럼 마이그레이션 (trade_style / ai_score / ai_reason)
+            docker-compose run --rm app python -m scripts.add_ai_log_columns
+            docker-compose run --rm app python -m scripts.add_bot_setting_ai_columns
+
             # ---------------------------------------------------
 
             # 3. DB 세팅이 모두 끝났으니, 안전하게 새 봇을 실행!
