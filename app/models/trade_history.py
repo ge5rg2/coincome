@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -50,6 +50,14 @@ class TradeHistory(Base):
     is_paper_trading: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
+
+    # ── AI 메타데이터 ─────────────────────────────────────────────────
+    # AI 매수 결정 시점의 분석 근거. 수동 봇 거래는 NULL.
+    is_ai_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    trade_style: Mapped[str | None] = mapped_column(String(20), nullable=True)   # "SWING" | "SCALPING"
+    ai_score: Mapped[int | None] = mapped_column(Integer, nullable=True)          # 0–100 매력도 점수
+    ai_reason: Mapped[str | None] = mapped_column(Text, nullable=True)            # AI 분석 근거 텍스트
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

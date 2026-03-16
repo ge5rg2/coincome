@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Float, ForeignKey, Numeric, String
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -32,5 +32,12 @@ class BotSetting(Base):
     # AI 포지션 리뷰·슬롯 카운트 시 is_ai_managed=True 레코드만 대상으로 삼아
     # 수동 봇 설정과의 혼선을 방지한다.
     is_ai_managed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # ── AI 메타데이터 ─────────────────────────────────────────────────
+    # AI 매수 결정 시점의 분석 근거를 저장한다.
+    # 수동 봇 포지션(is_ai_managed=False)에는 NULL.
+    trade_style: Mapped[str | None] = mapped_column(String(20), nullable=True)   # "SWING" | "SCALPING"
+    ai_score: Mapped[int | None] = mapped_column(Integer, nullable=True)          # 0–100 매력도 점수
+    ai_reason: Mapped[str | None] = mapped_column(Text, nullable=True)            # AI 분석 근거 텍스트
 
     user: Mapped["User"] = relationship("User", back_populates="bot_settings")
