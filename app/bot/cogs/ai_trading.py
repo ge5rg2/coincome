@@ -155,7 +155,6 @@ class AISettingView(discord.ui.View):
             user_id=self._user.user_id,
             mode=self.mode_value,
             style=self.style_value,
-            current_amount=int(self._user.ai_trade_amount),
             current_max_coins=self._user.ai_max_coins,
             current_budget=int(getattr(self._user, "ai_budget_krw", 0)),
         )
@@ -166,17 +165,19 @@ class AISettingView(discord.ui.View):
 # Step 2: Modal (숫자 입력 + DB 저장)
 # ------------------------------------------------------------------
 
-class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
-    """2단계: 매수 금액과 최대 종목 수를 입력받아 DB에 저장하는 Modal.
+class AIAmountModal(discord.ui.Modal, title="AI 실전 — 예산 설정"):
+    """2단계: 총 운용 예산·최대 종목 수를 입력받아 DB에 저장하는 Modal.
 
     Step 1 View에서 선택된 mode·style 값을 생성자로 받아 함께 저장한다.
+    1회 매수금액은 선택한 모드 비중(SNIPER=20%, BEAST=70%)에 따라
+    ``total_budget × weight_pct / 100`` 으로 파이썬 로직 내에서 자동 산정된다.
 
     Args:
         user_id:           Discord 사용자 ID.
         mode:              "ON" 또는 "OFF" (Step 1 에서 선택).
         style:             "SNIPER" 또는 "BEAST" (Step 1 에서 선택, 하위 호환: "SWING"/"SCALPING").
-        current_amount:    현재 DB 값 (pre-fill 용).
         current_max_coins: 현재 DB 값 (pre-fill 용).
+        current_budget:    현재 DB 값 (pre-fill 용).
     """
 
     def __init__(
@@ -184,7 +185,6 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
         user_id: str,
         mode: str,
         style: str,
-        current_amount: int,
         current_max_coins: int,
         current_budget: int = 0,
     ) -> None:
@@ -193,13 +193,6 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
         self._mode = mode
         self._style = style
 
-        self.trade_amount = discord.ui.TextInput(
-            label="1회 매수 금액 (KRW)",
-            placeholder="예: 10000  (최소 6,000)",
-            min_length=4,
-            max_length=10,
-            default=str(current_amount),
-        )
         self.max_coins = discord.ui.TextInput(
             label="최대 동시 보유 종목 수",
             placeholder="예: 3  (1 ~ 10)",
@@ -208,37 +201,19 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             default=str(current_max_coins),
         )
         self.budget = discord.ui.TextInput(
-            label="AI 전체 운용 예산 (KRW, 0 = 제한 없음)",
-            placeholder="예: 500000  (0 입력 시 잔고 전액 사용)",
-            min_length=1,
+            label="총 운용 예산 (KRW)",
+            placeholder="예: 500000  (이 금액 기준으로 1회 매수금액 자동 산정)",
+            min_length=4,
             max_length=12,
-            required=False,
-            default=str(current_budget),
+            default=str(current_budget) if current_budget > 0 else "",
         )
-        self.add_item(self.trade_amount)
         self.add_item(self.max_coins)
         self.add_item(self.budget)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        # ── 입력값 검증 ───────────────────────────────────────────────
-        try:
-            amount = int(self.trade_amount.value.replace(",", "").strip())
-        except ValueError:
-            await interaction.followup.send(
-                "❌ 매수 금액은 숫자로 입력해 주세요.", ephemeral=True
-            )
-            return
-
-        if amount < 6000:
-            await interaction.followup.send(
-                "❌ 매수 금액은 **최소 6,000 KRW** 이상이어야 합니다.\n"
-                "(업비트 최소 주문 한도 5,000원 + 손절 하락분 고려)",
-                ephemeral=True,
-            )
-            return
-
+        # ── 최대 종목 수 검증 ──────────────────────────────────────────
         try:
             max_coins = int(self.max_coins.value.strip())
         except ValueError:
@@ -253,21 +228,28 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             )
             return
 
-        # ── 운용 예산 검증 ─────────────────────────────────────────────
+        # ── 총 운용 예산 검증 ──────────────────────────────────────────
         try:
-            budget_raw = (self.budget.value or "0").replace(",", "").strip()
+            budget_raw = (self.budget.value or "").replace(",", "").strip()
             budget = int(budget_raw) if budget_raw else 0
         except ValueError:
             await interaction.followup.send(
-                "❌ 운용 예산은 숫자로 입력해 주세요. (0 입력 시 제한 없음)", ephemeral=True
+                "❌ 총 운용 예산은 숫자로 입력해 주세요.", ephemeral=True
             )
             return
 
-        if budget < 0:
+        if budget < 6_000:
             await interaction.followup.send(
-                "❌ 운용 예산은 **0 이상**이어야 합니다. (0 입력 시 잔고 전액 사용)", ephemeral=True
+                "❌ 총 운용 예산은 **최소 6,000 KRW** 이상이어야 합니다.\n"
+                "(업비트 최소 주문 한도 + 손절 하락분 고려)",
+                ephemeral=True,
             )
             return
+
+        # ── 모드 비중 기반 1회 매수금액 자동 산정 ────────────────────
+        # SNIPER(20%) / BEAST(70%) 비중에 따라 budget 의 일정 % 를 1회 매수에 사용
+        weight_pct = 20 if self._style in ("SNIPER", "SWING") else 70
+        trade_amount = max(6_000, int(budget * weight_pct / 100))
 
         enabled = self._mode == "ON"
 
@@ -281,7 +263,8 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
                 )
                 return
             user.ai_mode_enabled = enabled
-            user.ai_trade_amount = amount
+            # 1회 매수금액 = 예산 × 모드 비중 (자동 산정)
+            user.ai_trade_amount = trade_amount
             user.ai_max_coins = max_coins
             user.ai_trade_style = self._style
             user.ai_budget_krw = float(budget)
@@ -289,11 +272,15 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             await db.commit()
 
         logger.info(
-            "AI 실전 설정 업데이트: user_id=%s enabled=%s amount=%d max_coins=%d style=%s budget=%d",
-            self._user_id, enabled, amount, max_coins, self._style, budget,
+            "AI 실전 설정 업데이트: user_id=%s enabled=%s "
+            "budget=%d weight=%d%% trade_amount=%d max_coins=%d style=%s",
+            self._user_id, enabled, budget, weight_pct, trade_amount, max_coins, self._style,
         )
 
         # ── 모드별 동적 Embed 생성 (SNIPER / BEAST 분기) ─────────────
+        budget_str = f"{budget:,} KRW"
+        trade_str  = f"{trade_amount:,} KRW (예산의 {weight_pct}% 자동 산정)"
+
         if not enabled:
             # OFF 선택: 간단한 비활성화 확인 Embed
             embed = discord.Embed(
@@ -302,10 +289,8 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
                 color=discord.Color.greyple(),
             )
             embed.add_field(name="AI 모드", value="⏸️ 비활성화", inline=True)
-            embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
             embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-            budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
-            embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
+            embed.add_field(name="총 운용 예산", value=budget_str, inline=True)
             embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
         elif self._style in ("SNIPER", "SWING"):
             # SNIPER 모드 ON
@@ -313,22 +298,21 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
                 title="🛡️ 인텔리전트 스나이퍼 모드 가동",
                 description=(
                     "가용 시드의 **20%** 투입. "
-                    "MDD(최대 낙폭)를 최소화(-19%)하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
+                    "MDD(최대 낙폭)를 최소화하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
                 ),
                 color=discord.Color.blue(),
             )
             embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
-            embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
             embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-            budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
-            embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
-            # ── 공통 엔진(v7 전략) 설명 필드 ─────────────────────────
+            embed.add_field(name="총 운용 예산", value=budget_str, inline=True)
+            embed.add_field(name="💡 1회 매수금액 (자동)", value=trade_str, inline=False)
+            # ── 공통 전략 설명 필드 ───────────────────────────────────
             embed.add_field(
-                name="⚙️ 공통 엔진 — v7 알트코인 전략",
+                name="📋 전략",
                 value=(
-                    "**엔진:** v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
-                    "**손익비:** 1.5:1 강제 (목표 익절 **6.0%** / 기계적 손절 **4.0%**)\n"
-                    "**필터링:** 휩쏘 방지를 위해 무거운 메이저 코인(BTC·ETH 등) 거래 차단"
+                    "v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
+                    "손익비 1.5:1 강제 — 익절 **6.0%** / 손절 **4.0%**\n"
+                    "BTC·ETH 등 메이저 코인 거래 차단 (휩쏘 방지)"
                 ),
                 inline=False,
             )
@@ -340,23 +324,22 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
                 title="🔥 야수의 심장 모드 가동",
                 description=(
                     "가용 시드의 **70%** 투입. "
-                    "높은 MDD(-53%)를 감수하고 폭발적인 수익을 노리는 "
+                    "리스크를 감수하고 폭발적인 수익을 노리는 "
                     "**하이리스크 하이리턴 공격 모드**입니다."
                 ),
                 color=discord.Color.red(),
             )
             embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
-            embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
             embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-            budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
-            embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
-            # ── 공통 엔진(v7 전략) 설명 필드 ─────────────────────────
+            embed.add_field(name="총 운용 예산", value=budget_str, inline=True)
+            embed.add_field(name="💡 1회 매수금액 (자동)", value=trade_str, inline=False)
+            # ── 공통 전략 설명 필드 ───────────────────────────────────
             embed.add_field(
-                name="⚙️ 공통 엔진 — v7 알트코인 전략",
+                name="📋 전략",
                 value=(
-                    "**엔진:** v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
-                    "**손익비:** 1.5:1 강제 (목표 익절 **6.0%** / 기계적 손절 **4.0%**)\n"
-                    "**필터링:** 휩쏘 방지를 위해 무거운 메이저 코인(BTC·ETH 등) 거래 차단"
+                    "v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
+                    "손익비 1.5:1 강제 — 익절 **6.0%** / 손절 **4.0%**\n"
+                    "BTC·ETH 등 메이저 코인 거래 차단 (휩쏘 방지)"
                 ),
                 inline=False,
             )
