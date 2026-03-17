@@ -2,6 +2,7 @@ venv
 __pycache__/
 .env
 .result
+.cache/
 .DS_Store
 *.log
 *.db
