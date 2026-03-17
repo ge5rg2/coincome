@@ -2,13 +2,14 @@
 backtester.py — AI 모델 기반 코인 매매 전략 백테스트 스크립트.
 
 지원 모델:
-  - OpenAI   : gpt-5.4
-  - Anthropic: claude-sonnet-4-6
-  - Gemini   : gemini-3.1-pro-preview (google-genai SDK 사용)
+  - Anthropic: claude-sonnet-4-6  ★ 기본 (벤치마크 1위 채택)
+  - OpenAI   : gpt-4o-mini
+  - Gemini   : gemini-2.5-flash-lite (google-genai SDK 사용)
 
 실행 예시:
-  python scripts/backtester.py --model openai   --candles 200 --top 30
+  python scripts/backtester.py                              # 기본: anthropic
   python scripts/backtester.py --model anthropic --candles 200 --step 6
+  python scripts/backtester.py --model openai   --candles 200 --top 30
   python scripts/backtester.py --model gemini   --candles 200
   python scripts/backtester.py --model all      --candles 200
 
@@ -526,15 +527,14 @@ def simulate_trade_from_data(
     entry_price 기준으로 future_ohlcv의 각 봉 high/low를 순서대로 확인한다.
     동일 봉에서 복수 조건이 충족될 경우 WIN > BREAKEVEN > LOSS 우선순위를 적용한다.
 
-    [스마트 청산 로직 v5 — 반익반손 (Partial TP + 트레일링 스탑)]
-      - PARTIAL TP (반익): 목표가(+target_pct%) 도달 시 50% 물량 먼저 익절.
-          남은 50%의 트레일링 스탑을 본절가(+BREAKEVEN_EXIT_PCT%)로 상향 조정.
-          result는 "WIN"으로 표기, pnl_pct = (첫 50% PnL + 나머지 50% PnL) / 2.
-      - TRAILING STOP: 반익 완료 후 Low가 +BREAKEVEN_EXIT_PCT% 이하 → 나머지 50% 본절 청산.
-      - BREAKEVEN (전량 본절 청산): 반익 미완료 상태에서 High +BREAKEVEN_TRIGGER_PCT% 달성
-          후 Low +BREAKEVEN_EXIT_PCT% 이하 하락 시 전량 청산.
-      - TIME EXIT (시간 청산): TIME_EXIT_CANDLES봉 경과 시 잔여 포지션을 close 기준 청산.
-      - LOSS: 반익·본절 미활성 구간에서 원래 손절가 도달 시 전량 청산.
+    [스마트 청산 로직 v6 — 100% 전량 익절 + 방어 로직 유지]
+      - WIN: 목표가(+target_pct%) 도달 즉시 100% 전량 익절. 수익 극대화.
+      - BREAKEVEN (본절 방어막): 반익 없이 High +BREAKEVEN_TRIGGER_PCT(3.5%) 달성 후
+          Low가 +BREAKEVEN_EXIT_PCT(0.5%) 이하로 하락 시 전량 본절 청산.
+          → 트레일링 스탑 폐기. 수익 구간 진입 후 되돌림 시 최소 +0.5% 보장.
+      - TIME EXIT (시간 청산): TIME_EXIT_CANDLES(12봉=48h) 경과 후 강제 TIMEOUT.
+          방향성 없는 포지션의 장기 손절(-7%+) 위험 조기 차단.
+      - LOSS: 본절 미활성 구간에서 원래 손절가 도달 시 전량 청산.
 
     신규 상장·거래 정지 등으로 미래 봉이 부족하거나 비정상적인 경우
     "SKIP"을 반환한다. SKIP 결과는 메인 루프에서 CSV에 포함되지 않는다.
@@ -565,100 +565,47 @@ def simulate_trade_from_data(
     # ── 미래 봉 최소 개수 미달 — 타임아웃 또는 SKIP 처리 ────────────────────
     if len(valid_ohlcv) < MIN_FUTURE_CANDLES:
         if valid_ohlcv:
-            # 가용한 봉만으로 종가 기반 PnL 계산 후 TIMEOUT 처리
             pnl = (valid_ohlcv[-1][4] - entry_price) / entry_price * 100
             return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": len(valid_ohlcv)}
-        # 유효 봉이 아예 없으면 SKIP (CSV 제외 대상)
         return {"result": "SKIP", "pnl_pct": 0.0, "candles_held": 0}
 
-    # ── 진입 가격 기준 각종 청산 레벨 사전 계산 ──────────────────────────────
+    # ── 진입 가격 기준 청산 레벨 사전 계산 ───────────────────────────────────
     target_price            = entry_price * (1 + target_pct             / 100)
     stop_price              = entry_price * (1 - stop_pct               / 100)
     breakeven_trigger_price = entry_price * (1 + BREAKEVEN_TRIGGER_PCT  / 100)
     breakeven_exit_price    = entry_price * (1 + BREAKEVEN_EXIT_PCT     / 100)
 
-    breakeven_activated = False  # 본절 이동 플래그 (전량 포지션 구간)
-    partial_tp_done     = False  # 반익(Partial TP) 완료 플래그
-    partial_tp_pnl      = 0.0   # 첫 50% 익절 PnL (%)
+    breakeven_activated = False  # 본절 방어막 플래그
 
     for i, candle in enumerate(valid_ohlcv):
         high  = candle[2]
         low   = candle[3]
         close = candle[4]
 
-        if not partial_tp_done:
-            # ── 전량 포지션 관리 구간 ───────────────────────────────────────
+        # 본절 트리거 체크: 이번 봉 high가 진입가+3.5% 이상이면 활성화
+        if not breakeven_activated and high >= breakeven_trigger_price:
+            breakeven_activated = True
 
-            # 본절 트리거 체크: 이번 봉 high가 진입가+3.5% 이상이면 활성화
-            if not breakeven_activated and high >= breakeven_trigger_price:
-                breakeven_activated = True
+        # ── [우선순위 1] WIN: 목표가 도달 → 즉시 100% 전량 익절 ──────────────
+        if high >= target_price:
+            return {"result": "WIN", "pnl_pct": target_pct, "candles_held": i + 1}
 
-            # [우선순위 1] PARTIAL TP: 목표가 도달 → 50% 먼저 익절, 트레일링 스탑 상향
-            if high >= target_price:
-                partial_tp_done = True
-                partial_tp_pnl  = target_pct
-                # 같은 봉에서 트레일링 스탑(+0.5%)도 즉시 체크 (고변동 봉 방어)
-                if low <= breakeven_exit_price:
-                    second_pnl = BREAKEVEN_EXIT_PCT
-                    return {
-                        "result":       "WIN",
-                        "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
-                        "candles_held": i + 1,
-                    }
-                # 같은 봉이 TIME EXIT 봉이면 남은 50%를 close 기준으로 청산
-                if i == TIME_EXIT_CANDLES - 1:
-                    second_pnl = (close - entry_price) / entry_price * 100
-                    return {
-                        "result":       "WIN",
-                        "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
-                        "candles_held": i + 1,
-                    }
-                continue  # 남은 50% 트레일링 → 다음 봉부터 else 구간
+        # ── [우선순위 2] BREAKEVEN: 본절 방어막 ──────────────────────────────
+        # High +3.5% 달성(breakeven_activated) 후 Low +0.5% 이하 하락 시 본절 청산
+        if breakeven_activated and low <= breakeven_exit_price:
+            return {"result": "BREAKEVEN", "pnl_pct": BREAKEVEN_EXIT_PCT, "candles_held": i + 1}
 
-            # [우선순위 2] BREAKEVEN: 본절 활성화 후 진입가+0.5% 이하 전량 청산
-            # (반익 미완료 상태에서만 — 반익 이후에는 트레일링 스탑이 담당)
-            if breakeven_activated and low <= breakeven_exit_price:
-                return {"result": "BREAKEVEN", "pnl_pct": BREAKEVEN_EXIT_PCT, "candles_held": i + 1}
+        # ── [우선순위 3] LOSS: 원래 손절선 (본절 미활성 구간에서만 발동) ────────
+        if not breakeven_activated and low <= stop_price:
+            return {"result": "LOSS", "pnl_pct": -stop_pct, "candles_held": i + 1}
 
-            # [우선순위 3] LOSS: 원래 손절선 (본절·반익 미활성 구간에서만 발동)
-            if not breakeven_activated and low <= stop_price:
-                return {"result": "LOSS", "pnl_pct": -stop_pct, "candles_held": i + 1}
+        # ── [우선순위 4] TIME EXIT: 48시간(12봉) 경과 → 강제 TIMEOUT ──────────
+        if i == TIME_EXIT_CANDLES - 1:
+            pnl = (close - entry_price) / entry_price * 100
+            return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": i + 1}
 
-            # [우선순위 4] TIME EXIT: 48시간(12봉) 경과 → 전량 강제 청산
-            if i == TIME_EXIT_CANDLES - 1:
-                pnl = (close - entry_price) / entry_price * 100
-                return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": i + 1}
-
-        else:
-            # ── 반익 완료 후 남은 50% 트레일링 관리 구간 ──────────────────────
-
-            # 트레일링 스탑(+0.5%) 터치 → 남은 50% 본절 청산
-            if low <= breakeven_exit_price:
-                second_pnl = BREAKEVEN_EXIT_PCT
-                return {
-                    "result":       "WIN",
-                    "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
-                    "candles_held": i + 1,
-                }
-            # TIME EXIT 도달 → 남은 50%를 close 기준 청산
-            if i == TIME_EXIT_CANDLES - 1:
-                second_pnl = (close - entry_price) / entry_price * 100
-                return {
-                    "result":       "WIN",
-                    "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
-                    "candles_held": i + 1,
-                }
-
-    # ── 최종 타임아웃 (30봉 전체 소진) ───────────────────────────────────────
+    # ── 최종 타임아웃 (30봉 전체 소진 — TIME_EXIT 이후에도 청산 미발동) ─────────
     last_close = valid_ohlcv[-1][4]
-    if partial_tp_done:
-        # 반익 완료 후 30봉까지 트레일링·TIME_EXIT 미발동 → 마지막 close로 나머지 50% 청산
-        second_pnl = (last_close - entry_price) / entry_price * 100
-        return {
-            "result":       "WIN",
-            "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
-            "candles_held": len(valid_ohlcv),
-        }
     pnl = (last_close - entry_price) / entry_price * 100
     return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": len(valid_ohlcv)}
 
@@ -1065,8 +1012,8 @@ def main() -> None:
     parser.add_argument(
         "--model",
         choices=["openai", "anthropic", "gemini", "all"],
-        default="openai",
-        help="사용할 AI 모델 플랫폼 (all: 세 모델 모두 실행)",
+        default="anthropic",
+        help="사용할 AI 모델 플랫폼 (기본: anthropic / all: 세 모델 모두 실행)",
     )
     parser.add_argument(
         "--api-key",
