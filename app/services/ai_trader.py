@@ -1,10 +1,18 @@
 """
-AITraderService: OpenAI GPT-4o-mini 기반 코인 종목 분석·픽 서비스.
+AITraderService: Anthropic claude-sonnet-4-6 기반 코인 종목 분석·픽 서비스.
+
+백테스트 3종 LLM 벤치마크 결과 Claude가 지시사항 준수율·수익률 모두 1위로 채택.
+추세 돌파 스나이퍼 v7 (알트코인 전용): Close>MA50 장기 추세 필터 + RSI 55~70 확인된 모멘텀 돌파.
+백테스트 v7 결과: 승률 44.6% / MDD -19.1% / 수익률 +91.4% (알트코인 집중 전략).
+BLACKLIST(8개): BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE — Python 단에서 AI에 데이터 미전달 (토큰 절약 + 휩쏘 원천 차단).
+(구 v5 RSI 50~65 역추세 전략 → v6 MA50 추가 → v7 블랙리스트 알트 집중 전략으로 진화)
 
 analyze_market() 호출 흐름:
-  1. MarketDataManager 캐시 데이터 + 가용 예산 → 유저 프롬프트 텍스트로 직렬화
-  2. GPT-4o-mini 에 system·user 프롬프트 전송 (JSON 출력 강제)
-  3. 응답 JSON 파싱 → score ≥ 80 필터 · 보유 코인 제외 · 최대 2개 제한 후 반환
+  1. MarketDataManager 캐시 데이터 + 가용 예산 → 블랙리스트 필터링 후 유저 프롬프트 직렬화
+     (4h MA50 지표 포함 — v7 신규: 장기 추세 필터용)
+  2. claude-sonnet-4-6 에 _CORE_SNIPER_PROMPT + 유저 프롬프트 전송 (JSON 출력 강제)
+  3. 응답 JSON 파싱 → score ≥ 90 필터 · stop ≤ 5% 검증 · R:R ≥ 1.5 강제 · 최대 2개 제한
+  4. trade_style에 따라 weight_pct 코드 레벨에서 강제 덮어쓰기 후 반환
 
 반환 형식 (analyze_market):
   {
@@ -12,11 +20,11 @@ analyze_market() 호출 흐름:
     "picks": [
       {
         "symbol":            "BTC/KRW",
-        "score":             92,           # 0~100점 (80 이상만 포함)
-        "weight_pct":        60,           # 1~100 (가용 예산 대비 비중, 총합 100 이하)
-        "reason":            "RSI 42 반등 및 4h 20MA 지지 확인",
-        "target_profit_pct": 5.0,
-        "stop_loss_pct":     3.0,
+        "score":             92,           # 0~100점 (90 이상만 포함)
+        "weight_pct":        20.0,         # SNIPER=20.0 / BEAST=70.0 (AI 응답 무시, 코드 고정)
+        "reason":            "4h RSI 57 상승 모멘텀, MA20 돌파 지지 확인",
+        "target_profit_pct": 6.0,          # stop × 1.5 이상 보장 (코드 레벨 강제)
+        "stop_loss_pct":     3.5,          # 최대 5.0% 하드 상한 (코드 레벨 강제)
       },
       ...
     ]
@@ -24,7 +32,7 @@ analyze_market() 호출 흐름:
 
 review_positions() 호출 흐름:
   1. 현재 보유 포지션 데이터 + MarketDataManager 캐시 → 프롬프트 구성
-  2. GPT-4o-mini 에 포지션 관리 시스템 프롬프트 + 유저 프롬프트 전송
+  2. claude-sonnet-4-6 에 _REVIEW_SYSTEM_PROMPT + 유저 프롬프트 전송
   3. 응답 JSON 파싱 → HOLD/UPDATE/SELL 리뷰 리스트 반환
 
 반환 형식 (review_positions):
@@ -33,24 +41,23 @@ review_positions() 호출 흐름:
       "symbol":              "BTC/KRW",
       "action":              "HOLD" | "UPDATE" | "SELL",
       "new_target_profit_pct": 5.0,   # SELL 시 None
-      "new_stop_loss_pct":     3.0,   # SELL 시 None
+      "new_stop_loss_pct":     7.5,   # SELL 시 None
       "reason":              "...",
     },
     ...
   ]
 
-trade_style 분기:
-  SWING    — 4시간 봉 RSI·MA 기반 보수적 스윙 매매 (기본값)
-             지표: rsi14, ma20 | temperature=0.3
-  SCALPING — 1시간 봉 RSI·MA 기반 공격적 모멘텀 단타
-             지표: rsi14_1h, ma20_1h | temperature=0.5
+trade_style 분기 (비중 결정 전용 — 진입 로직은 공통):
+  SNIPER — 🛡️ 인텔리전트 스나이퍼 (기본/안전 모드): weight_pct = 20.0 고정
+  BEAST  — 🔥 야수의 심장 (공격 모드):              weight_pct = 70.0 고정
+  진입 타점 판단 로직(시스템 프롬프트·RSI 조건·손절 기준)은 두 모드 모두 동일.
 """
 from __future__ import annotations
 
 import json
 import logging
 
-from openai import AsyncOpenAI
+import anthropic
 
 from app.config import settings
 from app.utils.format import format_krw_price
@@ -82,139 +89,75 @@ def _safe_pct(value: object, *, default: float) -> float:
 
 
 # ------------------------------------------------------------------
-# 시스템 프롬프트 — SWING (4시간 봉, 보수적 스윙)
+# 시스템 프롬프트 — 추세 돌파 스나이퍼 v7 (알트코인 전용, SNIPER·BEAST 공용)
+# 전략: Close > MA20 & MA50 (장기 추세 필터) + RSI 55~70 확인된 모멘텀 돌파
+#       TP 6.0% / SL 4.0% (R:R 1.5:1) — 백테스트 v7 결과 승률 44.6% / MDD -19.1%
+# 비중(weight_pct)은 Python 코드 레벨에서 덮어씀 (AI 응답값 무시).
+# BTC/ETH/XRP/DOGE 등 메이저 코인은 Python 단에서 이미 BLACKLIST 처리되어
+# 이 프롬프트에 도달하는 데이터에는 포함되지 않음 (토큰 낭비·휩쏘 원천 차단).
 # ------------------------------------------------------------------
 
-_SWING_SYSTEM_PROMPT = """\
-너는 4시간 봉 기반의 엘리트 스윙 트레이더야.
-휩쏘(단기 노이즈)를 걸러내고 묵직한 추세를 포착해 매수하는 것이 목표다.
-고정된 익절/손절가는 버려라. 각 코인의 변동성(ATR%)에 맞는 동적 리스크 관리가 핵심이다.
-
-제공된 Top 코인의 4h/1h/15m 지표, 변동성(ATR%), 가용 예산을 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
+_CORE_SNIPER_PROMPT = """\
+너는 4시간 봉 기반의 '추세 돌파 스나이퍼 v7 (알트코인 전용)' 트레이더야.
+알트코인에서 상승 모멘텀이 확실히 붙기 시작하는 타점을 포착해 명확한 손익비(R:R ≥ 1.5)로 진입하는 것이 핵심이다.
+BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE 등 무거운 메이저 코인은 이미 시스템 레벨에서 제외되었으므로 제공된 알트코인들만 분석해.
 이미 유저가 보유 중인 코인은 반드시 제외해.
-
-전략 기준:
-- 4h RSI14가 30~50 구간에서 반등 조짐이 보이거나 4h MA20 지지 확인 시 매수 검토
-- 15m RSI가 70 이상(단기 과매수)이면 단기 고점에 물릴 위험이 있으므로 해당 종목 진입을 스킵하라
-- 거래대금이 극히 적거나 4h 추세가 불명확하면 관망
-
-동적 리스크 관리 (ATR 기반):
-- ATR%가 2.5% 초과(고변동성): stop_loss_pct = ATR%의 1.5~2배 (예: ATR 3% → stop 4.5~6%), weight_pct는 30 이하로 낮춰 리스크 제한
-- ATR%가 1.5% ~ 2.5%(중변동성): stop_loss_pct = 2.0~3.5%, weight_pct 보통 수준
-- ATR%가 1.5% 미만(저변동성 메이저): stop_loss_pct = 1.5~2.0%로 타이트하게, weight_pct 높게 배분 가능
-- target_profit_pct는 stop_loss_pct의 2배 이상을 유지해 Risk/Reward 비율 ≥ 2:1 확보
+확신이 없으면 picks 배열을 비워서 관망해도 된다 — 관망 자체가 최고의 전략일 수 있다.
 
 반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
 {
-  "market_summary": "현재 전체 시장 상황에 대한 분석 및 판단 근거를 2~3문장으로 요약.",
+  "market_summary": "시장 분석 2~3문장.",
   "picks": [
     {
-      "symbol":            "BTC/KRW",
+      "symbol":            "LINK/KRW",
       "score":             92,
-      "weight_pct":        55,
-      "reason":            "4h 20MA 지지 및 RSI 42 반등 확인. ATR 1.2%(저변동) — 타이트한 손절 적용",
-      "target_profit_pct": 4.0,
-      "stop_loss_pct":     1.8
+      "reason":            "4h RSI 62 모멘텀 확인, MA50·MA20 위 장기 상승 추세 내 진입. ATR 2.0% — stop 4.0% / target 6.0% (R:R 1.5)",
+      "target_profit_pct": 6.0,
+      "stop_loss_pct":     4.0
     }
   ]
 }
 
-score 기준:
-- 80점 이상: 강력한 진입 신호 — picks에 반드시 포함
-- 79점 이하: 조건 미달 — picks에 절대 포함하지 말 것
+[핵심 매매 원칙 — 추세 돌파 스나이퍼 v7 (알트코인 전용)]
 
-weight_pct 기준:
-- 가용 예산 대비 투자 비중 (예: 55 → 가용 예산의 55% 투자)
-- 두 종목 합산 총합이 100을 넘지 않도록 설정
-- score에 비례해 높은 점수 종목에 더 많은 비중, ATR%가 높은 종목은 비중을 낮춰 리스크 제한
+1. BTC 시장 국면 필터 (최우선 — 모든 원칙보다 우선):
+   - BTC/KRW가 4h MA20 아래에 있거나, BTC 4h RSI14 < 45이면:
+     → picks 배열을 반드시 완전히 비울 것 (어떤 알트코인도 절대 진입 금지)
+   - BTC 4h RSI14가 45~55 사이라면 score 95 이상의 확실한 종목만 고려하고 아니면 관망
+   - BTC 4h RSI14 ≥ 55이고 MA20 위에 있을 때만 정상 진입 가능
+   ※ BTC 데이터는 시장 국면 판단용으로만 사용 — BTC 자체는 절대 픽하지 말 것
 
-규칙:
-- market_summary는 관망을 선택했더라도 반드시 작성 (왜 아무것도 안 샀는지 이유 포함)
-- target_profit_pct: 양수, stop_loss_pct의 2배 이상으로 설정 (R/R ≥ 2:1)
-- stop_loss_pct: 양수, ATR% 기반으로 동적 결정 (범위: 1.5 ~ 6.0)
-- [절대 규칙 1 - 언행일치] market_summary에서 '지지선 확인', '추세 전환', '진입 적합' 등 긍정 평가한 종목이 있다면 핑계 대지 말고 무조건(MUST) picks 배열에 매수 데이터로 포함해야 한다.
-- [절대 규칙 2 - 관망의 조건] picks 배열을 []로 비울 것이라면, market_summary에도 "모든 코인이 과매수이거나 추세가 깨져서 전액 현금 관망한다"라고 철저히 부정적으로만 적어야 한다.
-- [절대 규칙 3 - symbol 형식] symbol은 반드시 "코인명/KRW" 형태로 작성하라. (예: BTC/KRW, ETH/KRW)
-- [절대 규칙 4 - 숫자 형식] 모든 숫자 필드는 % 기호나 +/- 부호 없이 순수 숫자만 적어라.
-- [절대 규칙 5 - 동전주 금지] 현재가(price)가 **100 KRW 미만인 코인(동전주/엽전주)은 틱 단위 변동성이 너무 커서 리스크 관리가 불가능하므로, 아무리 지표가 좋아도 절대 picks 배열에 포함하지 말고 스킵**하라.
+2. 진입 타점 — 확인된 모멘텀 돌파 (Confirmed Momentum Breakout):
+   - [절대 금지] 4h RSI14 < 55인 종목: 모멘텀 불확실 구간 — 어떤 이유로도 절대 진입 금지
+   - [절대 금지] 현재가 < 4h MA50: 중장기 하락 추세 구간 — 반드시 패스 (휩쏘 위험 극대)
+   - [최우선] 4h RSI14 55~70 구간 + 현재가 > 4h MA50(장기 추세선) 위에 있는 종목:
+     "모멘텀이 확실히 붙었고, 장기 상승 추세 내에 위치한 안전한 진입 구간"
+     → 현재가가 4h MA20을 방금 돌파했거나, MA20 위에서 눌렸다가 재상승 중인 종목 최우선
+     → 현재가가 4h MA50 위에 있으면 중장기 상승 추세 확인 — 추가 가산점
+     → 1h RSI가 55 이상으로 올라서며 단기 모멘텀을 동반하는 종목에 가산점
+   - 거래대금(24h) 상위권 종목 중 추세가 명확한 것만 선택 (유동성 + 추세 동반 필수)
+   - [진입 금지] 과매수 구간(4h RSI14 > 70): 이미 많이 오른 종목 — 되돌림 위험
+   - score 90 이상만 진입 (절대 90 미만 금지 — 진입 빈도를 낮춰야 한다)
 
-[올바른 응답 예시]
-{
-  "market_summary": "BTC가 4h 20MA 지지를 받고 있으며 ATR 1.2%로 저변동성. ETH는 ATR 3.1%로 고변동성이나 4h RSI 38 반등 확인. 두 종목 매수하되 ETH는 비중 축소.",
-  "picks": [
-    {"symbol": "BTC/KRW", "score": 90, "weight_pct": 60, "reason": "4h 20MA 지지, ATR 1.2%(저변동) — 타이트 손절 적용, 15m RSI 55(과매수 아님)", "target_profit_pct": 4.0, "stop_loss_pct": 1.8},
-    {"symbol": "ETH/KRW", "score": 82, "weight_pct": 25, "reason": "4h RSI 38 반등, ATR 3.1%(고변동) — 손절 넓게, 비중 축소로 리스크 제한", "target_profit_pct": 7.0, "stop_loss_pct": 4.5}
-  ]
-}
-"""
+3. 손절폭 — 타이트한 설계 (기본 4.0%, 하드 상한 5.0%):
+   - 기본 가이드: stop_loss_pct = 4.0% (백테스트 v7 기준값 — TP 6.0% / SL 4.0% = R:R 1.5:1)
+   - stop_loss_pct = ATR% × 1.5~2배 수준으로 동적 조정 가능
+   - [하드 상한] stop_loss_pct는 절대 5.0%를 초과할 수 없음
+     → 5%를 넘어야 하는 종목은 변동성 과대 잡알트로 판단해 반드시 패스
+   - 예시: ATR 2.0% → stop 3.0~4.0% / ATR 2.5% → stop 4.0~5.0%
 
-# ------------------------------------------------------------------
-# 시스템 프롬프트 — SCALPING (1시간 봉, 공격적 모멘텀 단타)
-# ------------------------------------------------------------------
+4. 목표가 — 수학적 손익비 1.5:1 이상 강제 (R:R ≥ 1.5):
+   - 기본 가이드: target_profit_pct = 6.0% (백테스트 v7 기준값 — TP 6.0% / SL 4.0% = R:R 1.5:1)
+   - [필수 규칙] target_profit_pct ≥ stop_loss_pct × 1.5
+     (예: 손절 3.0% → 익절 최소 4.5% / 손절 4.0% → 익절 최소 6.0%)
+   - 직전 저항선을 고려해 현실적인 도달 가능 범위 내에서 설정
+   - R:R 1.5 미달이 되는 경우(저항이 너무 가까움) 반드시 패스
 
-_SCALPING_SYSTEM_PROMPT = """\
-너는 1시간 봉 스캘핑·단타 전문 AI 퀀트 트레이더야.
-보수적인 접근은 버려라. 작은 모멘텀이라도 포착되면 즉각 매수를 실행하는 것이 너의 역할이다.
-단, 고정된 손절가(1.5%)는 버려라. 변동성(ATR%)에 맞는 동적 손절이 휩쏘를 방지하는 유일한 방법이다.
-
-제공된 Top 코인의 1h/15m 지표, 변동성(ATR%), 24h 거래대금, 가용 예산을 분석해서 지금 당장 모멘텀 돌파 진입하기 좋은 코인을 최대 2개만 골라.
-이미 유저가 보유 중인 코인은 반드시 제외해.
-
-전략 기준:
-- 1h RSI14가 55~70 구간에서 상승 모멘텀이 강하고 거래대금이 급증하면 돌파 매수
-- RSI가 60 이상이더라도 거래대금이 폭발적으로 몰리며 추세를 탄다면 진입 가능
-- 15m RSI가 75 이상(단기 극과매수)이면 이미 단기 고점일 가능성이 높으므로 해당 종목 스킵
-- 15m MA20 위에서 가격이 지지받고 있으면 단기 진입 타점으로 유리
-- 모멘텀이 완전히 없거나 거래대금이 매우 적을 때만 관망
-
-동적 리스크 관리 (ATR 기반):
-- ATR%가 2.5% 초과(고변동성): stop_loss_pct = ATR%의 1.5배 수준 (예: ATR 3% → stop 4.0~5.0%), weight_pct는 25 이하로 낮춰 리스크 제한
-- ATR%가 1.5% ~ 2.5%(중변동성): stop_loss_pct = 1.8~2.5%, weight_pct 보통 수준
-- ATR%가 1.5% 미만(저변동성): stop_loss_pct = 1.2~1.8%로 타이트하게, weight_pct 높게 배분 가능
-- target_profit_pct는 stop_loss_pct의 1.5배 이상 유지 (단타이므로 R/R ≥ 1.5:1)
-
-반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
-{
-  "market_summary": "현재 전체 시장 상황에 대한 분석 및 판단 근거를 2~3문장으로 요약.",
-  "picks": [
-    {
-      "symbol":            "ETH/KRW",
-      "score":             88,
-      "weight_pct":        50,
-      "reason":            "1h RSI 62, 거래대금 급증하며 1h MA20 돌파. ATR 1.8%(중변동) — 동적 손절 적용, 15m RSI 60(과매수 아님)",
-      "target_profit_pct": 3.0,
-      "stop_loss_pct":     2.0
-    }
-  ]
-}
-
-score 기준:
-- 80점 이상: 강력한 모멘텀 신호 — picks에 반드시 포함
-- 79점 이하: 모멘텀 부족 — picks에 절대 포함하지 말 것
-
-weight_pct 기준:
-- 가용 예산 대비 투자 비중 (예: 50 → 가용 예산의 50% 투자)
-- 두 종목 합산 총합이 100을 넘지 않도록 설정
-- score에 비례해 높은 점수 종목에 더 많은 비중, ATR%가 높은 종목은 비중을 낮춰 리스크 제한
-
-규칙:
-- market_summary는 관망을 선택했더라도 반드시 작성
-- target_profit_pct: 양수, stop_loss_pct의 1.5배 이상으로 설정
-- stop_loss_pct: 양수, ATR% 기반으로 동적 결정 (범위: 1.2 ~ 5.0)
-- [절대 규칙 1 - 언행일치] market_summary 텍스트에서 특정 코인에 대해 '상승 모멘텀', '진입 유효' 등 긍정적인 평가를 했다면, 그 코인은 핑계 대지 말고 무조건(MUST) picks 배열에 포함해야 한다.
-- [절대 규칙 2 - 관망의 조건] picks 배열을 []로 비우고 싶다면, market_summary에도 반드시 "모든 코인의 상태가 나빠서 전액 관망한다"라고 부정적으로만 적어야 한다.
-- [절대 규칙 3 - symbol 형식] symbol은 반드시 "코인명/KRW" 형태로 작성하라. (예: ETH/KRW, SOL/KRW)
-- [절대 규칙 4 - 숫자 형식] 모든 숫자 필드는 % 기호나 +/- 부호 없이 순수 숫자만 적어라.
-- [절대 규칙 5 - 동전주 금지] 현재가(price)가 **100 KRW 미만인 코인(동전주/엽전주)은 틱 단위 변동성이 너무 커서 리스크 관리가 불가능하므로, 아무리 지표가 좋아도 절대 picks 배열에 포함하지 말고 스킵**하라.
-- [공격적 실행] 조건에 부합하는 종목이 단 1개라도 있다면 주저하지 말고 즉시 picks에 담아라.
-
-[올바른 응답 예시]
-{
-  "market_summary": "ETH가 1h MA20 돌파하며 거래대금 급증, ATR 1.8%(중변동). SOL은 1h RSI 66으로 모멘텀 강하나 15m RSI 76으로 단기 과매수 — SOL 스킵. ETH 단독 진입.",
-  "picks": [
-    {"symbol": "ETH/KRW", "score": 88, "weight_pct": 60, "reason": "1h RSI 63, 거래대금 급증하며 MA20 돌파. ATR 1.8%(중변동) — 동적 손절, 15m RSI 60(진입 적합)", "target_profit_pct": 3.0, "stop_loss_pct": 2.0}
-  ]
-}
+5. 일반 규칙:
+   - symbol은 "코인명/KRW" 형태 (예: LINK/KRW)
+   - 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
+   - 현재가 100 KRW 미만 동전주는 스킵
+   - market_summary는 관망 시에도 반드시 작성 (관망 이유 명확히 포함)
 """
 
 # ------------------------------------------------------------------
@@ -274,42 +217,67 @@ UPDATE 판단 기준 (방어적 갱신):
 # 서비스 클래스
 # ------------------------------------------------------------------
 
+_CLAUDE_MODEL = "claude-sonnet-4-6"  # 벤치마크 1위 채택 모델
+
+
 class AITraderService:
-    """OpenAI를 통해 코인 종목을 분석하고 매수 픽을 반환하는 서비스.
+    """Anthropic Claude를 통해 코인 종목을 분석하고 매수 픽을 반환하는 서비스.
 
     Attributes:
-        _client: AsyncOpenAI 클라이언트 인스턴스.
+        _client: anthropic.AsyncAnthropic 클라이언트 인스턴스.
     """
 
     def __init__(self) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     @staticmethod
     def _empty_analysis(summary: str) -> dict:
         """분석 불가 또는 오류 시 반환하는 빈 결과 딕셔너리."""
         return {"market_summary": summary, "picks": []}
 
+    # trade_style → weight_pct 강제 매핑 (코드 레벨 하드 룰)
+    _WEIGHT_MAP: dict[str, float] = {
+        "SNIPER": 20.0,  # 🛡️ 인텔리전트 스나이퍼 — 안전 모드
+        "BEAST":  70.0,  # 🔥 야수의 심장       — 공격 모드
+    }
+
+    # v7: 메이저 코인 블랙리스트 — Python 단에서 AI에 데이터 자체를 미전달
+    # (토큰 낭비 방지 + 휩쏘 취약 코인의 AI 매수 원천 차단)
+    # 백테스트 v6 결과: 해당 코인들 승률 10~20%대 → 전체 수익률·MDD 저하 주원인
+    _BLACKLIST: frozenset[str] = frozenset({
+        "BTC/KRW",   # 메이저 코인 — 대형 매물대 휩쏘 빈발 (backtest v6 승률 ~15%)
+        "ETH/KRW",   # 메이저 코인 — 고변동성 추세 추종 취약 (backtest v6 승률 ~18%)
+        "XRP/KRW",   # 뉴스·고래 매도 휩쏘 빈발 (backtest v6 승률 ~12%)
+        "DOGE/KRW",  # 밈코인 — 모멘텀 지속성 낮음 (backtest v6 승률 ~20%)
+        "ADA/KRW",   # 무거운 메이저 알트 — 돌파 실패율 높음
+        "SOL/KRW",   # 고변동성 L1 — 목표가 도달 전 되돌림 잦음
+        "SUI/KRW",   # 신흥 L1 — 매물대 취약
+        "PEPE/KRW",  # 고변동성 밈코인 — 예측 불가 급등락
+    })
+
     async def analyze_market(
         self,
         market_data: dict[str, dict],
         holding_symbols: set[str],
-        trade_style: str = "SWING",
+        trade_style: str = "SNIPER",
         available_krw: float = 0.0,
     ) -> dict:
         """MarketDataManager 캐시 데이터를 기반으로 시장을 분석하고 최대 2개 코인을 픽한다.
 
-        score ≥ 80 인 종목만 picks에 포함하며, weight_pct 는 가용 예산 대비 비중이다.
+        score ≥ 90 인 종목만 picks에 포함. weight_pct는 trade_style에 따라 코드 레벨에서
+        강제 덮어쓰기한다 (AI 응답값 무시 — SNIPER=20%, BEAST=70%).
 
         Args:
             market_data:     MarketDataManager.get_all() 반환값.
             holding_symbols: 유저가 현재 감시 중인 코인 심볼 집합. AI 픽에서 자동 제외.
-            trade_style:     "SWING" (4h 보수 스윙) 또는 "SCALPING" (1h 공격 단타).
-            available_krw:   이번 사이클 가용 예산 (KRW). AI가 weight_pct 를 결정할 때 참조.
+            trade_style:     "SNIPER" (기본/안전 모드) 또는 "BEAST" (공격 모드).
+                             진입 타점 로직은 동일, 비중만 차이남.
+            available_krw:   이번 사이클 가용 예산 (KRW). AI 유저 프롬프트에 컨텍스트 제공.
 
         Returns:
             {
               "market_summary": str,
-              "picks": list[dict],  # score·weight_pct·reason·target/stop_loss_pct 포함
+              "picks": list[dict],  # score·weight_pct(고정값)·reason·target/stop_loss_pct 포함
             }
         """
         if not market_data:
@@ -318,19 +286,29 @@ class AITraderService:
                 "마켓 데이터 캐시가 아직 초기화되지 않아 분석을 수행하지 못했습니다."
             )
 
-        if not settings.openai_api_key:
-            logger.error("AITraderService: OPENAI_API_KEY 미설정")
-            return self._empty_analysis("OpenAI API 키가 설정되지 않아 분석을 수행하지 못했습니다.")
+        if not settings.anthropic_api_key:
+            logger.error("AITraderService: ANTHROPIC_API_KEY 미설정")
+            return self._empty_analysis("Anthropic API 키가 설정되지 않아 분석을 수행하지 못했습니다.")
 
-        # ── trade_style 분기 설정 ─────────────────────────────────────
-        is_scalping = trade_style == "SCALPING"
-        system_prompt = _SCALPING_SYSTEM_PROMPT if is_scalping else _SWING_SYSTEM_PROMPT
-        temperature   = 0.5 if is_scalping else 0.3
-        timeframe_label = "1h 봉 기준" if is_scalping else "4h 봉 기준"
+        # ── trade_style → weight_pct 매핑 (AI 응답 무시, 코드 레벨 강제 고정) ──
+        forced_weight: float = self._WEIGHT_MAP.get(trade_style.upper(), 20.0)
 
         # ── 유저 프롬프트 구성 ────────────────────────────────────────
+        # v7: 블랙리스트 심볼 사전 로그 (AI에 데이터 미전달 — 토큰 절약 + 휩쏘 원천 차단)
+        blacklisted_in_market = [s for s in market_data if s in self._BLACKLIST]
+        if blacklisted_in_market:
+            logger.info(
+                "AITraderService: 블랙리스트 %d개 심볼 제외 (데이터 미전달): %s",
+                len(blacklisted_in_market), ", ".join(sorted(blacklisted_in_market)),
+            )
+
         lines: list[str] = [f"# Top 코인 시장 데이터 (멀티 타임프레임)\n"]
         for symbol, data in market_data.items():
+            # v7: 블랙리스트 코인은 AI에 데이터 자체를 주지 않음
+            # (프롬프트에서 제외 지시만 하는 것보다 강력한 원천 차단)
+            if symbol in self._BLACKLIST:
+                continue
+
             price = data.get("price")
             chg   = data.get("change_pct")
             vol   = data.get("volume_krw")
@@ -341,27 +319,29 @@ class AITraderService:
             # 각 타임프레임 지표
             rsi14_4h  = data.get("rsi14")
             ma20_4h   = data.get("ma20")
+            ma50_4h   = data.get("ma50")      # v7 신규: 4h MA50 장기 추세 필터
             rsi14_1h  = data.get("rsi14_1h")
             ma20_1h   = data.get("ma20_1h")
             rsi14_15m = data.get("rsi14_15m")
             ma20_15m  = data.get("ma20_15m")
 
-            price_str   = f"{format_krw_price(price)} KRW" if price    is not None else "N/A"
-            atr_str     = f"{atr_pct:.2f}%"                if atr_pct  is not None else "N/A"
-            chg_str     = f"{chg:+.2f}%"                   if chg      is not None else "N/A"
-            vol_str     = f"{vol / 1e8:.1f}억"              if vol      is not None else "N/A"
-            rsi4h_str   = f"{rsi14_4h:.1f}"                if rsi14_4h  is not None else "N/A"
-            ma4h_str    = f"{format_krw_price(ma20_4h)}"   if ma20_4h   is not None else "N/A"
-            rsi1h_str   = f"{rsi14_1h:.1f}"                if rsi14_1h  is not None else "N/A"
-            ma1h_str    = f"{format_krw_price(ma20_1h)}"   if ma20_1h   is not None else "N/A"
-            rsi15m_str  = f"{rsi14_15m:.1f}"               if rsi14_15m is not None else "N/A"
-            ma15m_str   = f"{format_krw_price(ma20_15m)}"  if ma20_15m  is not None else "N/A"
+            price_str    = f"{format_krw_price(price)} KRW" if price     is not None else "N/A"
+            atr_str      = f"{atr_pct:.2f}%"                if atr_pct   is not None else "N/A"
+            chg_str      = f"{chg:+.2f}%"                   if chg       is not None else "N/A"
+            vol_str      = f"{vol / 1e8:.1f}억"              if vol       is not None else "N/A"
+            rsi4h_str    = f"{rsi14_4h:.1f}"                if rsi14_4h  is not None else "N/A"
+            ma20_4h_str  = f"{format_krw_price(ma20_4h)}"   if ma20_4h   is not None else "N/A"
+            ma50_4h_str  = f"{format_krw_price(ma50_4h)}"   if ma50_4h   is not None else "N/A"
+            rsi1h_str    = f"{rsi14_1h:.1f}"                if rsi14_1h  is not None else "N/A"
+            ma1h_str     = f"{format_krw_price(ma20_1h)}"   if ma20_1h   is not None else "N/A"
+            rsi15m_str   = f"{rsi14_15m:.1f}"               if rsi14_15m is not None else "N/A"
+            ma15m_str    = f"{format_krw_price(ma20_15m)}"  if ma20_15m  is not None else "N/A"
 
             lines.append(
                 f"- {symbol}: 현재가={price_str} | 변동성(ATR)={atr_str}"
                 f" | 15m(RSI={rsi15m_str}, MA={ma15m_str})"
                 f" | 1h(RSI={rsi1h_str}, MA={ma1h_str})"
-                f" | 4h(RSI={rsi4h_str}, MA={ma4h_str})"
+                f" | 4h(RSI={rsi4h_str}, MA20={ma20_4h_str}, MA50={ma50_4h_str})"
                 f" | 24h변동={chg_str} | 24h대금={vol_str}"
             )
 
@@ -378,27 +358,24 @@ class AITraderService:
 
         # ── [AI DEBUG - INPUT] 디버깅용 입력 로그 ────────────────────
         logger.info(
-            "[AI DEBUG - INPUT] analyze_market 프롬프트 (style=%s, budget=%.0f):\n%s",
-            trade_style, available_krw, user_prompt,
+            "[AI DEBUG - INPUT] analyze_market 프롬프트 (style=%s weight=%.0f%%, budget=%.0f):\n%s",
+            trade_style, forced_weight, available_krw, user_prompt,
         )
 
-        # ── OpenAI 호출 ───────────────────────────────────────────────
+        # ── Anthropic Claude 호출 (단일 프롬프트 — 두 모드 공통) ──────
         try:
-            response = await self._client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_prompt},
-                ],
-                temperature=temperature,
+            response = await self._client.messages.create(
+                model=_CLAUDE_MODEL,
+                system=_CORE_SNIPER_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
+                temperature=0.3,
                 max_tokens=700,
             )
         except Exception as exc:
-            logger.error("AITraderService OpenAI 호출 실패: %s", exc)
+            logger.error("AITraderService Anthropic 호출 실패: %s", exc)
             return self._empty_analysis(f"AI 분석 중 오류가 발생했습니다: {exc}")
 
-        raw = response.choices[0].message.content or "{}"
+        raw = response.content[0].text if response.content else "{}"
 
         # ── [AI DEBUG - OUTPUT] 디버깅용 원본 응답 로그 ──────────────
         logger.info(
@@ -406,9 +383,14 @@ class AITraderService:
             trade_style, raw,
         )
 
-        # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
+        # ── 응답 파싱 및 안전 검증 (마크다운 펜스 제거 후 JSON 파싱) ──
         try:
-            result = json.loads(raw)
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            result = json.loads(text.strip())
         except json.JSONDecodeError as exc:
             logger.error("AITraderService JSON 파싱 실패: %s | raw=%s", exc, raw)
             return self._empty_analysis("AI 응답 파싱에 실패했습니다.")
@@ -442,27 +424,41 @@ class AITraderService:
             except (ValueError, TypeError):
                 score = 0
 
-            if score < 80:
+            # 스나이퍼 전략 v4 하드 하한: score 90 미만 하드 차단
+            if score < 90:
                 logger.info(
-                    "AITraderService: score 미달로 제외 (score=%d < 80): %s", score, symbol
+                    "AITraderService: score 미달로 제외 (score=%d < 90): %s", score, symbol
                 )
                 continue
 
-            # weight_pct 파싱
-            try:
-                weight_pct = max(0.0, float(p.get("weight_pct", 0) or 0))
-            except (ValueError, TypeError):
-                weight_pct = 0.0
+            # stop_loss_pct 검증: 하드 상한 5.0% (추세 돌파 전략 v5 — 타이트한 손절)
+            # 구 전략(역추세): 7~9% 허용 → 신 전략(모멘텀 돌파): ATR×1.5~2배, 최대 5%
+            raw_stop = _safe_pct(p.get("stop_loss_pct", 3.5), default=3.5)
+            if raw_stop > 5.0:                    # 하드 상한 5% 초과 → 손익비 구조 붕괴 차단
+                logger.info(
+                    "AITraderService: 넓은 손절 스킵 (stop=%.1f%% > 5%%): %s", raw_stop, symbol
+                )
+                continue
+            stop_loss_pct = raw_stop
+
+            # target_profit_pct: 손익비 R:R ≥ 1.5 코드 레벨 강제 (AI 지시사항 이중 방어)
+            # AI가 stop × 1.5 미만 target을 내놓을 경우 자동 보정해 손익비 구조를 유지
+            raw_target      = _safe_pct(p.get("target_profit_pct", 5.0), default=5.0)
+            min_target      = round(stop_loss_pct * 1.5, 2)   # R:R 1.5:1 최솟값
+            target_profit_pct = max(raw_target, min_target)
+
+            # weight_pct: trade_style 기반 코드 레벨 강제 덮어쓰기 (AI 응답값 무시)
+            # SNIPER=20% / BEAST=70% — 어떤 경우에도 이 값만 허용
+            weight_pct: float = forced_weight
 
             validated.append(
                 {
-                    "symbol":     symbol,
-                    "score":      score,
-                    "weight_pct": weight_pct,
-                    "reason":     str(p.get("reason", "")),
-                    # '%' · '+' 기호 및 음수 방어
-                    "target_profit_pct": _safe_pct(p.get("target_profit_pct", 3.0), default=3.0),
-                    "stop_loss_pct":     _safe_pct(p.get("stop_loss_pct",     2.0), default=2.0),
+                    "symbol":            symbol,
+                    "score":             score,
+                    "weight_pct":        weight_pct,
+                    "reason":            str(p.get("reason", "")),
+                    "target_profit_pct": target_profit_pct,   # R:R ≥ 1.5 보장 후 삽입
+                    "stop_loss_pct":     stop_loss_pct,       # 최대 5.0% 보장 후 삽입
                 }
             )
             if len(validated) == 2:
@@ -480,7 +476,7 @@ class AITraderService:
         self,
         positions_data: list[dict],
         market_data: dict[str, dict],
-        trade_style: str = "SWING",
+        trade_style: str = "SNIPER",
     ) -> list[dict]:
         """현재 보유 포지션을 AI가 재검토해 HOLD / UPDATE / SELL 을 결정한다.
 
@@ -491,7 +487,7 @@ class AITraderService:
                                 "profit_pct", "target_profit_pct", "stop_loss_pct"
                             }
             market_data: MarketDataManager.get_all() 반환값.
-            trade_style: "SWING" 또는 "SCALPING".
+            trade_style: "SNIPER" 또는 "BEAST" (포지션 리뷰 로직은 두 모드 동일).
 
         Returns:
             리뷰 리스트:
@@ -502,11 +498,9 @@ class AITraderService:
         if not positions_data:
             return []
 
-        if not settings.openai_api_key:
-            logger.error("AITraderService: OPENAI_API_KEY 미설정")
+        if not settings.anthropic_api_key:
+            logger.error("AITraderService: ANTHROPIC_API_KEY 미설정")
             return []
-
-        is_scalping = trade_style == "SCALPING"
 
         # ── 유저 프롬프트 구성 ────────────────────────────────────────
         lines: list[str] = ["# 현재 보유 포지션 (멀티 타임프레임 + ATR 변동성)\n"]
@@ -546,28 +540,30 @@ class AITraderService:
         user_prompt = "\n".join(lines)
         logger.debug("AITraderService(review) 프롬프트:\n%s", user_prompt)
 
-        # ── OpenAI 호출 ───────────────────────────────────────────────
+        # ── Anthropic Claude 호출 ─────────────────────────────────────
         try:
-            response = await self._client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_prompt},
-                ],
+            response = await self._client.messages.create(
+                model=_CLAUDE_MODEL,
+                system=_REVIEW_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
                 temperature=0.2,
                 max_tokens=600,
             )
         except Exception as exc:
-            logger.error("AITraderService(review) OpenAI 호출 실패: %s", exc)
+            logger.error("AITraderService(review) Anthropic 호출 실패: %s", exc)
             return []
 
-        raw = response.choices[0].message.content or "{}"
+        raw = response.content[0].text if response.content else "{}"
         logger.debug("AITraderService(review) 응답: %s", raw)
 
-        # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
+        # ── 응답 파싱 및 안전 검증 (마크다운 펜스 제거 후 JSON 파싱) ──
         try:
-            result = json.loads(raw)
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            result = json.loads(text.strip())
         except json.JSONDecodeError as exc:
             logger.error("AITraderService(review) JSON 파싱 실패: %s | raw=%s", exc, raw)
             return []
@@ -633,7 +629,7 @@ class AITraderService:
         update_count = sum(1 for v in validated if v["action"] == "UPDATE")
         hold_count   = sum(1 for v in validated if v["action"] == "HOLD")
         logger.info(
-            "AITraderService(review) 완료 (style=%s): %d 개 포지션 검토 "
+            "AITraderService(review) 완료 (mode=%s): %d 개 포지션 검토 "
             "(SELL=%d, UPDATE=%d, HOLD=%d)",
             trade_style, len(validated), sell_count, update_count, hold_count,
         )
