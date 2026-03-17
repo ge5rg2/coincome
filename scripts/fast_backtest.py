@@ -4,21 +4,25 @@ fast_backtest.py — 로컬 OHLCV 캐시 기반 초고속 전략 백테스트.
 LLM · 업비트 API 호출 없이 .cache/ohlcv/ JSON 파일만 읽어
 순수 수학 연산으로 모멘텀 돌파(Momentum Breakout) 전략을 검증한다.
 
-[전략 — 추세 돌파 스나이퍼 v6: MA50 장기 추세 필터 도입]
+[전략 — 추세 돌파 스나이퍼 v7: 메이저 코인 블랙리스트 필터]
   진입: Close > MA20  AND  Close > MA50  AND  RSI 55~70
         ─ MA20: 단기 상승 돌파 확인
         ─ MA50: 중장기 상승 추세 내 위치 확인 (가짜 돌파/휩쏘 방어)
         ─ RSI 55~70: 강한 상승 모멘텀 초입 (과매수 진입 금지)
+  블랙리스트: BLACKLIST 등록 코인 자동 제외
+              (BTC/ETH/XRP 등 휩쏘 취약 메이저 코인 배제 → 알트코인 집중)
   익절: 진입가 대비 +TAKE_PROFIT_PCT% 도달 (기본 +6.0%, R:R 1.5:1)
   손절: 진입가 대비 -STOP_LOSS_PCT%  도달 (기본 -4.0%)
   우선순위: WIN > LOSS (동일 봉에서 TP·SL 동시 충족 시 WIN 적용)
   겹침 방지: 현재 포지션 청산 전까지 신규 진입 신호 무시 (per-symbol)
 
-[v1 → v6 변경 이력]
+[v1 → v7 변경 이력]
   v1 실패 원인: MA20 단독 필터로 메이저 코인 가짜 돌파(휩쏘)에 취약,
                 승률 33% / BEAST MDD -94.9%
-  v6 개선:      MA50 장기 추세 필터 추가, RSI 50~65 → 55~70 상향,
-                TP 8% → 6% (승률 우선, R:R 1.5:1)
+  v6 성과:      MA50 장기 추세 필터 + RSI 55~70 → 승률 40.4% 달성, ROI 우상향 전환.
+                단, 메이저 코인 휩쏘 잔존 → BEAST MDD -88.6% 과다
+  v7 개선:      BLACKLIST 도입 (BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE 제외)
+                알트코인 집중 전략 → MDD 최소화 목표
 
 [의존성]
   표준 라이브러리만 사용 (pandas / requests 불필요)
@@ -62,6 +66,20 @@ INITIAL_BALANCE:   float = 1_000_000  # 초기 시드 (KRW)
 
 # 심볼별 요약: 최소 이 거래 횟수 이상만 표시
 MIN_TRADES_FOR_DETAIL: int = 3
+
+# v7: 메이저 코인 블랙리스트 — 휩쏘 취약성 검증으로 제외 (알트코인 집중 전략)
+# v6 결과: 해당 코인들 승률 10~20%대 → 전체 수익률·MDD 저하 주요 원인
+# 변경하려면 이 리스트를 직접 수정하세요 (대소문자 무관하게 매칭)
+BLACKLIST: list[str] = [
+    "BTC_KRW",   # 메이저 코인 — 대형 매물대 휩쏘 빈발 (v6 승률 ~15%)
+    "ETH_KRW",   # 메이저 코인 — 고변동성 추세 추종 취약 (v6 승률 ~18%)
+    "XRP_KRW",   # 뉴스·고래 매도 휩쏘 빈발 (v6 승률 ~12%)
+    "DOGE_KRW",  # 밈코인 — 모멘텀 지속성 낮음 (v6 승률 ~20%)
+    "ADA_KRW",   # 무거운 메이저 알트 — 돌파 실패율 높음
+    "SOL_KRW",   # 고변동성 L1 — 목표가 도달 전 되돌림 잦음
+    "SUI_KRW",   # 신흥 L1 — 매물대 취약
+    "PEPE_KRW",  # 고변동성 밈코인 — 예측 불가 급등락
+]
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 경로 설정
@@ -479,6 +497,7 @@ def print_summary(
     rsi_min: float = RSI_ENTRY_MIN,
     rsi_max: float = RSI_ENTRY_MAX,
     candles_per_bar: int = 4,
+    label: str = "",
 ) -> None:
     """전체 백테스트 결과를 터미널에 출력한다.
 
@@ -488,6 +507,7 @@ def print_summary(
         tp_pct:          익절률 (%).
         sl_pct:          손절률 (%).
         candles_per_bar: 1봉당 실제 시간 (4h 봉 → 4).
+        label:           헤더에 추가할 부가 레이블 (예: " (블랙리스트 제외)").
     """
     total = len(all_trades)
 
@@ -495,7 +515,7 @@ def print_summary(
     sep2 = "═" * 64
 
     print(f"\n{_C}{_B}{'=' * 64}{_RS}")
-    print(f"{_C}{_B}  ⚡ FAST BACKTEST  —  Momentum Breakout v6 (MA50 추세 필터){_RS}")
+    print(f"{_C}{_B}  ⚡ FAST BACKTEST  —  Momentum Breakout v7{label}{_RS}")
     print(f"{_C}{sep2}{_RS}")
     print(f"  타임프레임  : {timeframe}봉")
     print(f"  진입 파라미터: MA{MA_PERIOD} & MA{MA50_PERIOD} (추세 필터)  |  RSI {rsi_min:.0f}~{rsi_max:.0f}")
@@ -603,6 +623,118 @@ def print_summary(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 블랙리스트 필터 효과 비교 출력
+# ──────────────────────────────────────────────────────────────────────────────
+
+def print_comparison(
+    full_trades: list[dict],
+    clean_trades: list[dict],
+    blacklist_syms: list[str],
+) -> None:
+    """블랙리스트 적용 전후 핵심 지표 비교표를 터미널에 출력한다.
+
+    전체 결과(블랙리스트 포함)와 정제 결과(블랙리스트 제외)의
+    승률·MDD·ROI를 나란히 표시해 필터 효과를 한눈에 파악할 수 있게 한다.
+
+    Args:
+        full_trades:    블랙리스트 포함 전체 거래 내역 (entry_ts 오름차순).
+        clean_trades:   블랙리스트 제외 정제 거래 내역 (entry_ts 오름차순).
+        blacklist_syms: 실제 캐시에서 발견된 블랙리스트 심볼 목록.
+    """
+    if not full_trades:
+        return
+
+    sep  = "─" * 64
+    sep2 = "═" * 64
+
+    # ── 전체(블랙리스트 포함) 통계 계산 ──────────────────────────────────
+    f_total         = len(full_trades)
+    f_wins          = sum(1 for t in full_trades if t["result"] == "WIN")
+    f_wr            = f_wins / f_total * 100
+    f_s_final, f_s_mdd = simulate_balance(full_trades, SNIPER_WEIGHT_PCT)
+    f_b_final, f_b_mdd = simulate_balance(full_trades, BEAST_WEIGHT_PCT)
+    f_s_roi         = (f_s_final - INITIAL_BALANCE) / INITIAL_BALANCE * 100
+    f_b_roi         = (f_b_final - INITIAL_BALANCE) / INITIAL_BALANCE * 100
+
+    # ── 정제(블랙리스트 제외) 통계 계산 ──────────────────────────────────
+    c_total         = len(clean_trades)
+    c_wins          = sum(1 for t in clean_trades if t["result"] == "WIN")
+    c_wr            = c_wins / c_total * 100 if c_total else 0.0
+    c_s_final, c_s_mdd = simulate_balance(clean_trades, SNIPER_WEIGHT_PCT)
+    c_b_final, c_b_mdd = simulate_balance(clean_trades, BEAST_WEIGHT_PCT)
+    c_s_roi         = (c_s_final - INITIAL_BALANCE) / INITIAL_BALANCE * 100
+    c_b_roi         = (c_b_final - INITIAL_BALANCE) / INITIAL_BALANCE * 100
+
+    print(f"\n{_C}{_B}{'=' * 64}{_RS}")
+    print(f"{_C}{_B}  🚫 블랙리스트 필터 효과 비교 ({len(blacklist_syms)}개 제외){_RS}")
+    print(f"{_C}{sep2}{_RS}")
+    print(f"  제외 심볼 : {', '.join(blacklist_syms)}")
+    print(f"  {sep}")
+    print(
+        f"  {'항목':<20} {'블랙리스트 포함':>13} {'블랙리스트 제외':>13}  {'변화':>7}"
+    )
+    print(f"  {'─' * 60}")
+
+    # ── 총 거래 횟수 ──────────────────────────────────────────────────────
+    trade_delta = c_total - f_total   # 음수 (줄어든 거래)
+    print(
+        f"  {'총 거래 횟수':<20} {f_total:>11}회 {c_total:>11}회  "
+        f"{_Y}{trade_delta:>+6}회{_RS}"
+    )
+
+    # ── 승률 ──────────────────────────────────────────────────────────────
+    wr_delta = c_wr - f_wr
+    wr_c = _G if wr_delta >= 0 else _R
+    wr_arrow = "▲" if wr_delta > 0 else ("▼" if wr_delta < 0 else "─")
+    print(
+        f"  {'승률':<21} {f_wr:>11.1f}% {c_wr:>11.1f}%  "
+        f"{wr_c}{wr_arrow}{abs(wr_delta):.1f}%p{_RS}"
+    )
+
+    # ── SNIPER MDD (감소할수록 개선 — 부호 반전) ──────────────────────────
+    s_mdd_delta = f_s_mdd - c_s_mdd   # 양수 = 개선 (MDD 감소)
+    s_mdd_c = _G if s_mdd_delta >= 0 else _R
+    s_mdd_arrow = "▼" if s_mdd_delta >= 0 else "▲"   # ▼ MDD 감소 = 좋음
+    print(
+        f"  {'🛡️ SNIPER MDD':<20} {-f_s_mdd:>11.1f}% {-c_s_mdd:>11.1f}%  "
+        f"{s_mdd_c}{s_mdd_arrow}{abs(s_mdd_delta):.1f}%p{_RS}"
+    )
+
+    # ── BEAST MDD ─────────────────────────────────────────────────────────
+    b_mdd_delta = f_b_mdd - c_b_mdd   # 양수 = 개선 (MDD 감소)
+    b_mdd_c = _G if b_mdd_delta >= 0 else _R
+    b_mdd_arrow = "▼" if b_mdd_delta >= 0 else "▲"
+    print(
+        f"  {'🔥 BEAST MDD':<20} {-f_b_mdd:>11.1f}% {-c_b_mdd:>11.1f}%  "
+        f"{b_mdd_c}{b_mdd_arrow}{abs(b_mdd_delta):.1f}%p{_RS}"
+    )
+
+    # ── SNIPER ROI ────────────────────────────────────────────────────────
+    s_roi_delta = c_s_roi - f_s_roi
+    s_roi_c = _G if s_roi_delta >= 0 else _R
+    s_roi_arrow = "▲" if s_roi_delta >= 0 else "▼"
+    f_s_sign = "+" if f_s_roi >= 0 else ""
+    c_s_sign = "+" if c_s_roi >= 0 else ""
+    print(
+        f"  {'🛡️ SNIPER ROI':<20} {f_s_sign}{f_s_roi:>10.2f}% {c_s_sign}{c_s_roi:>10.2f}%  "
+        f"{s_roi_c}{s_roi_arrow}{abs(s_roi_delta):.2f}%p{_RS}"
+    )
+
+    # ── BEAST ROI ─────────────────────────────────────────────────────────
+    b_roi_delta = c_b_roi - f_b_roi
+    b_roi_c = _G if b_roi_delta >= 0 else _R
+    b_roi_arrow = "▲" if b_roi_delta >= 0 else "▼"
+    f_b_sign = "+" if f_b_roi >= 0 else ""
+    c_b_sign = "+" if c_b_roi >= 0 else ""
+    print(
+        f"  {'🔥 BEAST ROI':<20} {f_b_sign}{f_b_roi:>10.2f}% {c_b_sign}{c_b_roi:>10.2f}%  "
+        f"{b_roi_c}{b_roi_arrow}{abs(b_roi_delta):.2f}%p{_RS}"
+    )
+
+    print(f"\n{_C}{sep2}{_RS}\n")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # CLI 진입점
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -663,41 +795,70 @@ def main() -> None:
     # ── [1단계] 캐시 로드 ─────────────────────────────────────────────────
     ohlcv_map = load_ohlcv_files(timeframe=args.timeframe, symbol_filter=args.symbol)
 
-    # ── [2단계] 심볼별 백테스트 실행 ─────────────────────────────────────
-    logger.info(
-        "[전략 v6] TP +%.1f%%  SL -%.1f%%  RSI %.0f~%.0f  MA%d & MA%d (추세 필터)",
-        tp_pct, sl_pct, rsi_min, rsi_max, MA_PERIOD, MA50_PERIOD,
+    # ── [2단계] 블랙리스트 식별 ───────────────────────────────────────────
+    # 캐시에 실제 존재하는 블랙리스트 심볼만 추출 (대소문자 무관 매칭)
+    blacklist_upper = {s.upper() for s in BLACKLIST}
+    found_blacklist = sorted(
+        s for s in ohlcv_map if s.upper() in blacklist_upper
     )
+    if found_blacklist:
+        logger.info(
+            "[블랙리스트 v7] 제외 대상 %d개: %s",
+            len(found_blacklist), ", ".join(found_blacklist),
+        )
+
+    logger.info(
+        "[전략 v7] TP +%.1f%%  SL -%.1f%%  RSI %.0f~%.0f  MA%d & MA%d  블랙리스트 %d개",
+        tp_pct, sl_pct, rsi_min, rsi_max, MA_PERIOD, MA50_PERIOD, len(found_blacklist),
+    )
+
+    # ── [3단계] 심볼별 백테스트 실행 (전체 — 비교 데이터 수집) ────────────
+    # 블랙리스트 포함 전체를 먼저 실행해 before/after 비교에 사용
     all_trades: list[dict] = []
     for sym, ohlcv in sorted(ohlcv_map.items()):
+        is_bl = sym.upper() in blacklist_upper
         trades = backtest_symbol(
             sym, ohlcv, tp_pct=tp_pct, sl_pct=sl_pct,
             rsi_min=rsi_min, rsi_max=rsi_max,
         )
+        tag = " 🚫[BL]" if is_bl else ""
         logger.info(
-            "  %-14s | %3d봉 | 거래 %2d회 (WIN %d / LOSS %d / TO %d)",
+            "  %-14s | %3d봉 | 거래 %2d회 (WIN %d / LOSS %d / TO %d)%s",
             sym, len(ohlcv), len(trades),
             sum(1 for t in trades if t["result"] == "WIN"),
             sum(1 for t in trades if t["result"] == "LOSS"),
             sum(1 for t in trades if t["result"] == "TIMEOUT"),
+            tag,
         )
         all_trades.extend(trades)
 
-    # 시간순 정렬 (SNIPER/BEAST 잔고 시뮬레이션에서 누적 잔고 정확도 보장)
+    # 시간순 정렬 (SNIPER/BEAST 잔고 시뮬레이션 누적 정확도 보장)
     all_trades.sort(key=lambda t: t["entry_ts"])
 
-    # ── [3단계] 결과 출력 ──────────────────────────────────────────────────
+    # 블랙리스트 제외 정제 거래 내역
+    clean_trades = [
+        t for t in all_trades if t["symbol"].upper() not in blacklist_upper
+    ]
+
+    # ── [4단계] 결과 출력 ──────────────────────────────────────────────────
     candles_per_bar = int(args.timeframe.replace("h", "")) if args.timeframe.endswith("h") else 1
+
+    # 메인 결과: 블랙리스트 제외 정제 결과 출력
     print_summary(
-        all_trades, args.timeframe, tp_pct, sl_pct,
+        clean_trades, args.timeframe, tp_pct, sl_pct,
         rsi_min=rsi_min, rsi_max=rsi_max,
         candles_per_bar=candles_per_bar,
+        label=" (블랙리스트 제외)",
     )
 
-    # ── [4단계] CSV 저장 (옵션) ────────────────────────────────────────────
-    if args.csv and all_trades:
-        csv_path = save_csv(all_trades, tp_pct, sl_pct)
-        print(f"  💾 CSV 저장 완료: {csv_path}\n")
+    # 블랙리스트 필터 효과 비교표 (before vs after)
+    if found_blacklist:
+        print_comparison(all_trades, clean_trades, found_blacklist)
+
+    # ── [5단계] CSV 저장 (옵션) — 블랙리스트 제외 정제 데이터 기준 ──────────
+    if args.csv and clean_trades:
+        csv_path = save_csv(clean_trades, tp_pct, sl_pct)
+        print(f"  💾 CSV 저장 완료 (블랙리스트 제외): {csv_path}\n")
 
 
 if __name__ == "__main__":
