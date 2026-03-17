@@ -2,11 +2,14 @@
 AITraderService: Anthropic claude-sonnet-4-6 기반 코인 종목 분석·픽 서비스.
 
 백테스트 3종 LLM 벤치마크 결과 Claude가 지시사항 준수율·수익률 모두 1위로 채택.
-추세 돌파 스나이퍼 v5: RSI 50~65 상승 모멘텀 돌파 타점, 손익비 R:R ≥ 1.5 강제.
-(구 v4 RSI 30~45 역추세 전략 폐기 — 5개월 백테스트 승률 50% / 손익비 악화로 실패)
+추세 돌파 스나이퍼 v7 (알트코인 전용): Close>MA50 장기 추세 필터 + RSI 55~70 확인된 모멘텀 돌파.
+백테스트 v7 결과: 승률 44.6% / MDD -19.1% / 수익률 +91.4% (알트코인 집중 전략).
+BLACKLIST(8개): BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE — Python 단에서 AI에 데이터 미전달 (토큰 절약 + 휩쏘 원천 차단).
+(구 v5 RSI 50~65 역추세 전략 → v6 MA50 추가 → v7 블랙리스트 알트 집중 전략으로 진화)
 
 analyze_market() 호출 흐름:
-  1. MarketDataManager 캐시 데이터 + 가용 예산 → 유저 프롬프트 텍스트로 직렬화
+  1. MarketDataManager 캐시 데이터 + 가용 예산 → 블랙리스트 필터링 후 유저 프롬프트 직렬화
+     (4h MA50 지표 포함 — v7 신규: 장기 추세 필터용)
   2. claude-sonnet-4-6 에 _CORE_SNIPER_PROMPT + 유저 프롬프트 전송 (JSON 출력 강제)
   3. 응답 JSON 파싱 → score ≥ 90 필터 · stop ≤ 5% 검증 · R:R ≥ 1.5 강제 · 최대 2개 제한
   4. trade_style에 따라 weight_pct 코드 레벨에서 강제 덮어쓰기 후 반환
@@ -86,16 +89,18 @@ def _safe_pct(value: object, *, default: float) -> float:
 
 
 # ------------------------------------------------------------------
-# 시스템 프롬프트 — 추세 돌파 스나이퍼 v5 (SNIPER·BEAST 공용)
-# 전략: RSI 50~65 상승 모멘텀 돌파 + 손익비 R:R ≥ 1.5 수학적 강제
+# 시스템 프롬프트 — 추세 돌파 스나이퍼 v7 (알트코인 전용, SNIPER·BEAST 공용)
+# 전략: Close > MA20 & MA50 (장기 추세 필터) + RSI 55~70 확인된 모멘텀 돌파
+#       TP 6.0% / SL 4.0% (R:R 1.5:1) — 백테스트 v7 결과 승률 44.6% / MDD -19.1%
 # 비중(weight_pct)은 Python 코드 레벨에서 덮어씀 (AI 응답값 무시).
+# BTC/ETH/XRP/DOGE 등 메이저 코인은 Python 단에서 이미 BLACKLIST 처리되어
+# 이 프롬프트에 도달하는 데이터에는 포함되지 않음 (토큰 낭비·휩쏘 원천 차단).
 # ------------------------------------------------------------------
 
 _CORE_SNIPER_PROMPT = """\
-너는 4시간 봉 기반의 '추세 돌파 스나이퍼' 트레이더야.
-상승 모멘텀이 막 시작되는 타점을 포착해 명확한 손익비(R:R ≥ 1.5)로 진입하는 것이 핵심이다.
-제공된 코인들의 멀티 타임프레임(4h/1h/15m) RSI·MA·ATR 지표를 분석해서
-지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
+너는 4시간 봉 기반의 '추세 돌파 스나이퍼 v7 (알트코인 전용)' 트레이더야.
+알트코인에서 상승 모멘텀이 확실히 붙기 시작하는 타점을 포착해 명확한 손익비(R:R ≥ 1.5)로 진입하는 것이 핵심이다.
+BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE 등 무거운 메이저 코인은 이미 시스템 레벨에서 제외되었으므로 제공된 알트코인들만 분석해.
 이미 유저가 보유 중인 코인은 반드시 제외해.
 확신이 없으면 picks 배열을 비워서 관망해도 된다 — 관망 자체가 최고의 전략일 수 있다.
 
@@ -104,46 +109,52 @@ _CORE_SNIPER_PROMPT = """\
   "market_summary": "시장 분석 2~3문장.",
   "picks": [
     {
-      "symbol":            "BTC/KRW",
-      "score":             91,
-      "reason":            "4h RSI 57 상승 모멘텀 진입, MA20 돌파 직후 지지 확인. ATR 1.8% — stop 3.5% / target 6.0% (R:R 1.71)",
+      "symbol":            "LINK/KRW",
+      "score":             92,
+      "reason":            "4h RSI 62 모멘텀 확인, MA50·MA20 위 장기 상승 추세 내 진입. ATR 2.0% — stop 4.0% / target 6.0% (R:R 1.5)",
       "target_profit_pct": 6.0,
-      "stop_loss_pct":     3.5
+      "stop_loss_pct":     4.0
     }
   ]
 }
 
-[핵심 매매 원칙 — 추세 돌파 스나이퍼 v5]
+[핵심 매매 원칙 — 추세 돌파 스나이퍼 v7 (알트코인 전용)]
 
 1. BTC 시장 국면 필터 (최우선 — 모든 원칙보다 우선):
    - BTC/KRW가 4h MA20 아래에 있거나, BTC 4h RSI14 < 45이면:
      → picks 배열을 반드시 완전히 비울 것 (어떤 알트코인도 절대 진입 금지)
    - BTC 4h RSI14가 45~55 사이라면 score 95 이상의 확실한 종목만 고려하고 아니면 관망
    - BTC 4h RSI14 ≥ 55이고 MA20 위에 있을 때만 정상 진입 가능
+   ※ BTC 데이터는 시장 국면 판단용으로만 사용 — BTC 자체는 절대 픽하지 말 것
 
-2. 진입 타점 — 상승 모멘텀 돌파 (Momentum Breakout):
-   - [절대 금지] 4h RSI14 < 50인 종목: '떨어지는 칼날' — 어떤 이유로도 절대 진입 금지
-   - [최우선] 4h RSI14 50~65 구간: "이제 막 모멘텀이 살아나는 구간"
+2. 진입 타점 — 확인된 모멘텀 돌파 (Confirmed Momentum Breakout):
+   - [절대 금지] 4h RSI14 < 55인 종목: 모멘텀 불확실 구간 — 어떤 이유로도 절대 진입 금지
+   - [절대 금지] 현재가 < 4h MA50: 중장기 하락 추세 구간 — 반드시 패스 (휩쏘 위험 극대)
+   - [최우선] 4h RSI14 55~70 구간 + 현재가 > 4h MA50(장기 추세선) 위에 있는 종목:
+     "모멘텀이 확실히 붙었고, 장기 상승 추세 내에 위치한 안전한 진입 구간"
      → 현재가가 4h MA20을 방금 돌파했거나, MA20 위에서 눌렸다가 재상승 중인 종목 최우선
-     → 1h RSI가 50 이상으로 올라서며 단기 모멘텀을 동반하는 종목에 가산점
+     → 현재가가 4h MA50 위에 있으면 중장기 상승 추세 확인 — 추가 가산점
+     → 1h RSI가 55 이상으로 올라서며 단기 모멘텀을 동반하는 종목에 가산점
    - 거래대금(24h) 상위권 종목 중 추세가 명확한 것만 선택 (유동성 + 추세 동반 필수)
    - [진입 금지] 과매수 구간(4h RSI14 > 70): 이미 많이 오른 종목 — 되돌림 위험
    - score 90 이상만 진입 (절대 90 미만 금지 — 진입 빈도를 낮춰야 한다)
 
-3. 손절폭 — 타이트한 설계 (하드 상한 5.0%):
-   - stop_loss_pct = ATR% × 1.5~2배 수준으로 설정
+3. 손절폭 — 타이트한 설계 (기본 4.0%, 하드 상한 5.0%):
+   - 기본 가이드: stop_loss_pct = 4.0% (백테스트 v7 기준값 — TP 6.0% / SL 4.0% = R:R 1.5:1)
+   - stop_loss_pct = ATR% × 1.5~2배 수준으로 동적 조정 가능
    - [하드 상한] stop_loss_pct는 절대 5.0%를 초과할 수 없음
      → 5%를 넘어야 하는 종목은 변동성 과대 잡알트로 판단해 반드시 패스
    - 예시: ATR 2.0% → stop 3.0~4.0% / ATR 2.5% → stop 4.0~5.0%
 
 4. 목표가 — 수학적 손익비 1.5:1 이상 강제 (R:R ≥ 1.5):
+   - 기본 가이드: target_profit_pct = 6.0% (백테스트 v7 기준값 — TP 6.0% / SL 4.0% = R:R 1.5:1)
    - [필수 규칙] target_profit_pct ≥ stop_loss_pct × 1.5
      (예: 손절 3.0% → 익절 최소 4.5% / 손절 4.0% → 익절 최소 6.0%)
    - 직전 저항선을 고려해 현실적인 도달 가능 범위 내에서 설정
    - R:R 1.5 미달이 되는 경우(저항이 너무 가까움) 반드시 패스
 
 5. 일반 규칙:
-   - symbol은 "코인명/KRW" 형태 (예: BTC/KRW)
+   - symbol은 "코인명/KRW" 형태 (예: LINK/KRW)
    - 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
    - 현재가 100 KRW 미만 동전주는 스킵
    - market_summary는 관망 시에도 반드시 작성 (관망 이유 명확히 포함)
@@ -230,6 +241,20 @@ class AITraderService:
         "BEAST":  70.0,  # 🔥 야수의 심장       — 공격 모드
     }
 
+    # v7: 메이저 코인 블랙리스트 — Python 단에서 AI에 데이터 자체를 미전달
+    # (토큰 낭비 방지 + 휩쏘 취약 코인의 AI 매수 원천 차단)
+    # 백테스트 v6 결과: 해당 코인들 승률 10~20%대 → 전체 수익률·MDD 저하 주원인
+    _BLACKLIST: frozenset[str] = frozenset({
+        "BTC/KRW",   # 메이저 코인 — 대형 매물대 휩쏘 빈발 (backtest v6 승률 ~15%)
+        "ETH/KRW",   # 메이저 코인 — 고변동성 추세 추종 취약 (backtest v6 승률 ~18%)
+        "XRP/KRW",   # 뉴스·고래 매도 휩쏘 빈발 (backtest v6 승률 ~12%)
+        "DOGE/KRW",  # 밈코인 — 모멘텀 지속성 낮음 (backtest v6 승률 ~20%)
+        "ADA/KRW",   # 무거운 메이저 알트 — 돌파 실패율 높음
+        "SOL/KRW",   # 고변동성 L1 — 목표가 도달 전 되돌림 잦음
+        "SUI/KRW",   # 신흥 L1 — 매물대 취약
+        "PEPE/KRW",  # 고변동성 밈코인 — 예측 불가 급등락
+    })
+
     async def analyze_market(
         self,
         market_data: dict[str, dict],
@@ -269,8 +294,21 @@ class AITraderService:
         forced_weight: float = self._WEIGHT_MAP.get(trade_style.upper(), 20.0)
 
         # ── 유저 프롬프트 구성 ────────────────────────────────────────
+        # v7: 블랙리스트 심볼 사전 로그 (AI에 데이터 미전달 — 토큰 절약 + 휩쏘 원천 차단)
+        blacklisted_in_market = [s for s in market_data if s in self._BLACKLIST]
+        if blacklisted_in_market:
+            logger.info(
+                "AITraderService: 블랙리스트 %d개 심볼 제외 (데이터 미전달): %s",
+                len(blacklisted_in_market), ", ".join(sorted(blacklisted_in_market)),
+            )
+
         lines: list[str] = [f"# Top 코인 시장 데이터 (멀티 타임프레임)\n"]
         for symbol, data in market_data.items():
+            # v7: 블랙리스트 코인은 AI에 데이터 자체를 주지 않음
+            # (프롬프트에서 제외 지시만 하는 것보다 강력한 원천 차단)
+            if symbol in self._BLACKLIST:
+                continue
+
             price = data.get("price")
             chg   = data.get("change_pct")
             vol   = data.get("volume_krw")
@@ -281,27 +319,29 @@ class AITraderService:
             # 각 타임프레임 지표
             rsi14_4h  = data.get("rsi14")
             ma20_4h   = data.get("ma20")
+            ma50_4h   = data.get("ma50")      # v7 신규: 4h MA50 장기 추세 필터
             rsi14_1h  = data.get("rsi14_1h")
             ma20_1h   = data.get("ma20_1h")
             rsi14_15m = data.get("rsi14_15m")
             ma20_15m  = data.get("ma20_15m")
 
-            price_str   = f"{format_krw_price(price)} KRW" if price    is not None else "N/A"
-            atr_str     = f"{atr_pct:.2f}%"                if atr_pct  is not None else "N/A"
-            chg_str     = f"{chg:+.2f}%"                   if chg      is not None else "N/A"
-            vol_str     = f"{vol / 1e8:.1f}억"              if vol      is not None else "N/A"
-            rsi4h_str   = f"{rsi14_4h:.1f}"                if rsi14_4h  is not None else "N/A"
-            ma4h_str    = f"{format_krw_price(ma20_4h)}"   if ma20_4h   is not None else "N/A"
-            rsi1h_str   = f"{rsi14_1h:.1f}"                if rsi14_1h  is not None else "N/A"
-            ma1h_str    = f"{format_krw_price(ma20_1h)}"   if ma20_1h   is not None else "N/A"
-            rsi15m_str  = f"{rsi14_15m:.1f}"               if rsi14_15m is not None else "N/A"
-            ma15m_str   = f"{format_krw_price(ma20_15m)}"  if ma20_15m  is not None else "N/A"
+            price_str    = f"{format_krw_price(price)} KRW" if price     is not None else "N/A"
+            atr_str      = f"{atr_pct:.2f}%"                if atr_pct   is not None else "N/A"
+            chg_str      = f"{chg:+.2f}%"                   if chg       is not None else "N/A"
+            vol_str      = f"{vol / 1e8:.1f}억"              if vol       is not None else "N/A"
+            rsi4h_str    = f"{rsi14_4h:.1f}"                if rsi14_4h  is not None else "N/A"
+            ma20_4h_str  = f"{format_krw_price(ma20_4h)}"   if ma20_4h   is not None else "N/A"
+            ma50_4h_str  = f"{format_krw_price(ma50_4h)}"   if ma50_4h   is not None else "N/A"
+            rsi1h_str    = f"{rsi14_1h:.1f}"                if rsi14_1h  is not None else "N/A"
+            ma1h_str     = f"{format_krw_price(ma20_1h)}"   if ma20_1h   is not None else "N/A"
+            rsi15m_str   = f"{rsi14_15m:.1f}"               if rsi14_15m is not None else "N/A"
+            ma15m_str    = f"{format_krw_price(ma20_15m)}"  if ma20_15m  is not None else "N/A"
 
             lines.append(
                 f"- {symbol}: 현재가={price_str} | 변동성(ATR)={atr_str}"
                 f" | 15m(RSI={rsi15m_str}, MA={ma15m_str})"
                 f" | 1h(RSI={rsi1h_str}, MA={ma1h_str})"
-                f" | 4h(RSI={rsi4h_str}, MA={ma4h_str})"
+                f" | 4h(RSI={rsi4h_str}, MA20={ma20_4h_str}, MA50={ma50_4h_str})"
                 f" | 24h변동={chg_str} | 24h대금={vol_str}"
             )
 
