@@ -586,7 +586,19 @@ class SettingsCog(commands.Cog):
             # 익절 / 손절 설정 표시 (미설정이면 "미설정" 표기)
             tp_str = f"+{s.target_profit_pct:.1f}%" if s.target_profit_pct is not None else "미설정"
             sl_str = f"-{s.stop_loss_pct:.1f}%" if s.stop_loss_pct is not None else "미설정"
-            config_line = f"**익절:** {tp_str}  |  **손절:** {sl_str}  |  **매수금액:** {float(s.buy_amount_krw):,.0f} KRW"
+
+            # 매매 모드 태그 (trade_style → 브랜드 이름으로 표시)
+            _MODE_DISPLAY: dict[str, str] = {
+                "SNIPER": "🛡️ 인텔리전트 스나이퍼",
+                "BEAST":  "🔥 야수의 심장",
+            }
+            mode_tag  = _MODE_DISPLAY.get(s.trade_style or "", "")
+            mode_line = f"**모드:** {mode_tag}\n" if mode_tag else ""
+
+            config_line = (
+                f"{mode_line}"
+                f"**익절:** {tp_str}  |  **손절:** {sl_str}  |  **매수금액:** {float(s.buy_amount_krw):,.0f} KRW"
+            )
 
             # 매수 체결이 완료되어 DB에 단가와 수량이 있는 경우
             if s.buy_price and s.amount_coin and current_price:
