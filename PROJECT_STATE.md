@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-17
+> **기준일**: 2026-03-17 (최종 수정: 2026-03-17 — 스나이퍼 v2 전략 적용)
 > **현재 작업 브랜치**: `backtest`
 > **최신 안정 브랜치**: `dev` (커밋 `4abaaf5`)
 
@@ -252,13 +252,13 @@ coincome/
 | 우선순위 | 항목 | 관련 브랜치 |
 |---|---|---|
 | 🔴 높음 | **PR #35 리뷰·병합** — 백테스터를 `dev`에 통합 | `backtest` → `dev` |
-| 🟡 보통 | 백테스터 실제 실행 결과 분석 및 프롬프트 튜닝 | `backtest` |
+| 🟡 보통 | 스나이퍼 v2 전략 재실행 후 승률 재검증 | `backtest` |
 | 🟡 보통 | AI 매매 성과 리포트 (실전 이력 집계 → Discord DM) | 신규 브랜치 필요 |
 | 🟢 낮음 | `feat`, `feat-new` 브랜치 정리(삭제) | — |
 
 ---
 
-## 10. 백테스팅 파이프라인 (신규, `backtest` 브랜치)
+## 10. 백테스팅 파이프라인 (`backtest` 브랜치)
 
 `scripts/backtester.py` — OpenAI / Anthropic / Gemini 3종 LLM 성능 비교
 
@@ -271,31 +271,67 @@ export ANTHROPIC_API_KEY=...    # Anthropic 어댑터 사용 시
 export GEMINI_API_KEY=...       # Gemini 어댑터 사용 시
 
 # 단일 모델
-python scripts/backtester.py --model openai
+python scripts/backtester.py --model openai --candles 200 --step 6
 
 # 3개 모델 순차 비교
-python scripts/backtester.py --model all
+python scripts/backtester.py --model all --candles 200
+
+# 가상 시드 조정
+python scripts/backtester.py --model openai --budget 500000
 ```
 
 ### 모델 구성
 
 | 어댑터 | 모델 ID | JSON 강제 방식 |
 |---|---|---|
-| `OpenAIAdapter` | `gpt-4.1-mini` | `response_format={"type": "json_object"}` |
+| `OpenAIAdapter` | `gpt-5.4` | `response_format={"type": "json_object"}` |
 | `AnthropicAdapter` | `claude-sonnet-4-6` | 프롬프트 JSON 지시 + fallback 파서 |
-| `GeminiAdapter` | `gemini-2.5-flash` | `response_mime_type: application/json` |
+| `GeminiAdapter` | `gemini-3.1-pro-preview` | `GenerateContentConfig(response_mime_type="application/json")` |
 
-### 시뮬레이션 파라미터
+### CLI 파라미터
 
-| 파라미터 | 값 |
-|---|---|
-| 분석 대상 코인 | BTC / ETH / SOL / XRP / DOGE (KRW 마켓) |
-| 지표 계산 윈도우 | 60봉 (1h 기준) |
-| 분석 사이클 간격 | 4시간 |
-| 최대 보유 시간 | 48시간 (타임아웃) |
-| 동전주 하드 필터 | 100 KRW 미만 제외 |
+| 파라미터 | 기본값 | 설명 |
+|---|---|---|
+| `--model` | `openai` | 사용 모델 (openai / anthropic / gemini / all) |
+| `--top` | `30` | 분석 대상 상위 코인 수 (거래대금 기준) |
+| `--candles` | `200` | 지표 계산용 과거 4h 봉 수 |
+| `--future-candles` | `20` | 시뮬레이션용 미래 4h 봉 수 |
+| `--step` | `6` | AI 분석 사이클 간격 (4h 봉 수, 기본 6 = 24시간) |
+| `--budget` | `1_000_000` | 가상 시드 (KRW) |
 
 ### 출력
 
-- **콘솔**: 모델별 총 매매·승률·누적 수익률·종목별 평균·파싱 에러 수
-- **`backtest_results.csv`**: Append 모드 (run_at / model / symbol / score / profit_pct / result 등)
+- **콘솔**: 모델별 총 매매·승률·평균PnL·가상 잔고 ROI·AI 토큰 비용
+- **`.result/backtest_results_YYYYMMDD_HHMMSS.csv`**: 실행마다 신규 파일 생성
+
+### CSV 컬럼
+
+`Timestamp / Model / Symbol / Score / Weight_Pct / Entry_Price / Target_Profit_Pct / Stop_Loss_Pct / Reason / Sim_Result / Sim_PnL_Pct / Candles_Held / Invested_KRW / PnL_KRW / Balance_KRW / Input_Tokens / Output_Tokens / Estimated_Cost_USD`
+
+---
+
+## 11. 백테스트 실패 분석 & 전략 개선 이력
+
+### 🔴 1차 실패 (승률 20%대) — 원인 분석
+
+| 실패 원인 | 내용 |
+|---|---|
+| **손절폭 과소 설정** | stop_loss_pct 2.0~4.5%로 너무 좁아 일반적인 가격 변동(휩쏘)에도 즉시 손절 발동 |
+| **BTC 하락장 무시** | BTC가 하락/횡보 국면임에도 알트코인에 무차별 진입 → 시장 흐름 역행 |
+| **진입 문턱 낮음** | score 80 기준이 너무 낮아 확신 없는 픽도 다수 포함 |
+| **과도한 투입 비중** | weight_pct 50~60%로 단일 픽에 과도한 자금 집중 |
+| **ERROR 결과 오염** | 신규 상장 코인 등 미래 데이터 부족 시 PnL 0.0% 기록으로 통계 왜곡 |
+
+### ✅ 스나이퍼 v2 전략 적용 내용 (2026-03-17)
+
+| 항목 | 변경 전 | 변경 후 |
+|---|---|---|
+| Score 임계값 | 80 (parse_picks 하드 차단) | **90** (극도 보수적 진입) |
+| stop_loss_pct 최솟값 | 3.5% | **7.0%** (ATR × 2~3배) |
+| weight_pct 상한 | 없음 | **30%** (투입 비중 제한) |
+| BTC 필터 — 강제 관망 | 프롬프트 룰만 존재 | **유저 프롬프트에 ⛔ 태그 명시** → AI가 즉시 인지 |
+| BTC 필터 — 극도 주의 | 없음 | **유저 프롬프트에 ⚠️ 태그 명시** → score 95+ 강제 |
+| JSON 예시 앵커링 | stop 4.5, target 6.0, weight 55 | **stop 7.5, target 12.0, weight 25** |
+| ERROR 결과 처리 | CSV에 PnL 0.0으로 기록 (통계 오염) | **SKIP 처리 — CSV 제외, 잔고 변동 없음** |
+| 미래 봉 검증 | 없음 | **MIN_FUTURE_CANDLES=5 미달 시 조기 경고 + SKIP** |
+| 비정상 봉 필터 | 없음 | **high<0, low<0, high<low 봉 자동 필터링** |

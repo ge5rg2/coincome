@@ -78,6 +78,9 @@ RESULT_DIR = Path(__file__).parent.parent / ".result"
 # Time-Stepping 최소 워밍업 봉 수 (RSI14 + MA20 계산을 위한 최소 데이터)
 WARMUP_CANDLES = 21
 
+# 시뮬레이션에 필요한 미래 봉 최솟값 (이 미만이면 SKIP 처리 — 신규 상장·거래 정지 방어)
+MIN_FUTURE_CANDLES = 5
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 비용 계산 헬퍼
@@ -216,13 +219,13 @@ class GeminiAdapter:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 시스템 프롬프트 (SWING 전략 기준)
+# 시스템 프롬프트 (스나이퍼 전략 v2 — Score 90+, 손절 7%+, BTC 국면 필터)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
 너는 4시간 봉 기반의 고승률 스나이퍼 트레이더야.
 제공된 Top 코인의 RSI·MA·ATR 지표, 가용 예산을 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
-확신이 없으면 picks 배열을 비워서 관망해도 된다.
+확신이 없으면 picks 배열을 비워서 관망해도 된다 — 관망 자체가 최고의 전략일 수 있다.
 
 반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
 {
@@ -230,43 +233,50 @@ _SYSTEM_PROMPT = """\
   "picks": [
     {
       "symbol":            "BTC/KRW",
-      "score":             92,
-      "weight_pct":        55,
-      "reason":            "RSI 44 반등 및 4h 20MA 지지, ATR% 3.5%로 손절폭 확보",
-      "target_profit_pct": 6.0,
-      "stop_loss_pct":     4.5
+      "score":             91,
+      "weight_pct":        25,
+      "reason":            "RSI 48 반등, MA20 지지 확인, ATR% 4.2% 반영 손절폭 7.5% 설정",
+      "target_profit_pct": 12.0,
+      "stop_loss_pct":     7.5
     }
   ]
 }
 
-[핵심 매매 원칙 — 고승률 스나이퍼]
+[핵심 매매 원칙 — 고승률 스나이퍼 v2]
 
-1. 손절폭 (휩쏘 방어):
-   - stop_loss_pct 최솟값: 3.5% (ATR%가 낮은 저변동성 시)
-   - 고변동성 (ATR% 3~5%): stop_loss_pct 5.0~7.0% 사용
-   - stop_loss_pct 3.5% 미만으로 절대 설정하지 말 것
-
-2. BTC 하락장 관망 룰:
+1. BTC 시장 국면 필터 (최우선 — 모든 원칙보다 우선):
+   - 유저 프롬프트에 "⛔ [BTC 하락장 — 강제 관망 발동]" 표시가 있으면:
+     → picks 배열을 반드시 완전히 비울 것 (어떤 알트코인도 절대 진입 금지)
+   - 유저 프롬프트에 "⚠️ [BTC 약세 — 극도 보수적 대응]" 표시가 있으면:
+     → score 95 이상의 매우 확실한 종목만 고려. 아니면 관망.
    - BTC/KRW RSI14 < 45이면 알트코인 픽 극도로 자제
-   - BTC/KRW RSI14 < 40이면 알트코인 picks 배열을 완전히 비울 것
-   - BTC가 MA20 아래에 있고 RSI14 < 50이면 알트코인 진입 금지
+   - BTC/KRW 현재가가 MA20 아래에 있고 RSI14 < 50이면 알트코인 진입 금지
 
-3. 과매수 타점 회피:
-   - 대상 코인 RSI14 > 70이면 진입 패스 (과매수 구간)
-   - RSI14 60~70이면 매우 보수적으로 판단 (score 87 이상 필수)
+2. 손절폭 — 휩쏘 방어 (핵심 변경):
+   - stop_loss_pct = ATR% × 2~3배 (최소 7% 이상 필수)
+   - ATR% 3%대 기준: stop_loss_pct 7~9%
+   - ATR% 5% 이상: stop_loss_pct 10~15%
+   - stop_loss_pct 7% 미만으로 절대 설정하지 말 것 (좁은 손절 = 휩쏘 직격)
 
-4. 진입 조건 (모두 충족 시에만 픽):
-   - score 85 이상
-   - RSI14 35~65 구간 (중립~반등 구간)
-   - MA20 지지 또는 돌파 확인
-   - 24h 거래대금 50억 KRW 이상 (유동성 확보)
-
-5. 리스크-리워드:
+3. 리스크-리워드:
    - target_profit_pct는 stop_loss_pct의 최소 1.5배 이상
-   - 예: stop_loss_pct 4.5% → target_profit_pct 최소 6.75%
+   - 예: stop_loss_pct 7% → target_profit_pct 최소 10.5%
+   - 예: stop_loss_pct 10% → target_profit_pct 최소 15%
+
+4. 포지션 사이징 — 보수적 비중:
+   - weight_pct 최대 30% 이하 (손절폭이 넓으므로 투입 비중을 반드시 줄여야 함)
+   - 2개 픽 시 합산 weight_pct가 50% 이하
+   - 확신이 낮거나 변동성이 높으면 weight_pct 10~20% 사용
+
+5. 진입 조건 (모두 충족 시에만 픽):
+   - score 90 이상 (절대 90 미만 진입 금지 — 진입 빈도를 낮춰야 한다)
+   - RSI14 35~60 구간 (상승 여력이 있는 중립~반등 구간)
+   - MA20 지지 또는 직전 저항 돌파 확인
+   - 24h 거래대금 50억 KRW 이상 (유동성 확보)
+   - 과매수 구간(RSI14 > 65) 진입 금지
 
 6. 일반 규칙:
-   - symbol은 "코인명/KRW" 형태로 작성 (예: BTC/KRW)
+   - symbol은 "코인명/KRW" 형태 (예: BTC/KRW)
    - 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
    - 현재가 100 KRW 미만 동전주는 스킵
 """
@@ -381,7 +391,46 @@ def compute_indicators_from_ohlcv(ohlcv: list[list]) -> dict[str, Any]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_user_prompt(market_data: dict[str, dict], budget_krw: float = 1_000_000) -> str:
-    lines = ["# Top 코인 시장 데이터 (4h 봉 기준)\n"]
+    """AI에 전달할 유저 프롬프트를 빌드한다.
+
+    BTC 시장 국면(Market Regime)을 가장 먼저 명시해 AI가 하락장 필터를
+    즉시 적용할 수 있도록 유도한다. BTC 상태에 따라 강제 관망 / 극도 주의 /
+    정상 진입 세 가지 등급으로 구분해 경고 문구를 삽입한다.
+    """
+    lines: list[str] = []
+
+    # ── BTC 시장 국면(Market Regime) 분석 — 최우선 전달 ──────────────────────
+    btc = market_data.get("BTC/KRW", {})
+    if btc:
+        btc_rsi       = btc.get("rsi14", 50.0)
+        btc_price     = btc.get("price", 0.0)
+        btc_ma20      = btc.get("ma20",  0.0)
+        btc_above_ma20 = (btc_price >= btc_ma20) if btc_ma20 > 0 else True
+        ma20_tag      = "MA20 위" if btc_above_ma20 else "MA20 아래"
+
+        # 강제 관망: RSI < 40 이거나, MA20 아래이면서 RSI < 50
+        if btc_rsi < 40 or (not btc_above_ma20 and btc_rsi < 50):
+            lines.append(
+                f"⛔ [BTC 하락장 — 강제 관망 발동]\n"
+                f"   BTC RSI14={btc_rsi:.1f} | 현재가 {btc_price:,.0f}KRW ({ma20_tag})\n"
+                f"   → picks 배열을 반드시 비울 것 (어떤 알트코인도 진입 금지)\n"
+            )
+        # 극도 주의: RSI < 45 이거나 MA20 아래
+        elif btc_rsi < 45 or not btc_above_ma20:
+            lines.append(
+                f"⚠️ [BTC 약세 — 극도 보수적 대응]\n"
+                f"   BTC RSI14={btc_rsi:.1f} | 현재가 {btc_price:,.0f}KRW ({ma20_tag})\n"
+                f"   → 알트코인 픽 극도 자제. score 95 이상 확실한 종목만 고려.\n"
+            )
+        # 정상 진입 가능
+        else:
+            lines.append(
+                f"✅ [BTC 상승장 — 정상 진입 가능]\n"
+                f"   BTC RSI14={btc_rsi:.1f} | 현재가 {btc_price:,.0f}KRW ({ma20_tag})\n"
+            )
+
+    # ── 코인별 시장 데이터 ────────────────────────────────────────────────────
+    lines.append("# Top 코인 시장 데이터 (4h 봉 기준)\n")
     for symbol, d in market_data.items():
         price   = d.get("price")
         rsi14   = d.get("rsi14")
@@ -432,17 +481,21 @@ def parse_picks(raw: str) -> list[dict]:
             score = int(p.get("score", 0) or 0)
         except (ValueError, TypeError):
             score = 0
-        if score < 85:
+        # 스나이퍼 v2: score 90 미만은 진입 빈도를 줄이기 위해 하드 차단
+        if score < 90:
             continue
-        raw_stop = abs(float(p.get("stop_loss_pct", 4.5) or 4.5))
-        # 스나이퍼 전략 하드 하한: stop_loss_pct 3.5% 미만이면 강제 보정
-        stop_loss_pct = max(raw_stop, 3.5)
+        raw_stop = abs(float(p.get("stop_loss_pct", 7.5) or 7.5))
+        # 스나이퍼 v2 하드 하한: stop_loss_pct 7% 미만이면 강제 보정 (휩쏘 방어)
+        stop_loss_pct = max(raw_stop, 7.0)
+        raw_weight = float(p.get("weight_pct", 0) or 0)
+        # 손절폭이 넓으므로 투입 비중 상한 30% 강제
+        weight_pct = min(raw_weight, 30.0)
         validated.append({
             "symbol":            symbol,
             "score":             score,
-            "weight_pct":        float(p.get("weight_pct", 0) or 0),
+            "weight_pct":        weight_pct,
             "reason":            str(p.get("reason", "")),
-            "target_profit_pct": abs(float(p.get("target_profit_pct", 6.0) or 6.0)),
+            "target_profit_pct": abs(float(p.get("target_profit_pct", 12.0) or 12.0)),
             "stop_loss_pct":     stop_loss_pct,
         })
         if len(validated) == 2:
@@ -465,6 +518,9 @@ def simulate_trade_from_data(
     entry_price 기준으로 future_ohlcv의 각 봉 high/low를 순서대로 확인한다.
     동일 봉에서 익절·손절 조건이 모두 충족되면 익절(WIN)을 우선한다.
 
+    신규 상장·거래 정지 등으로 미래 봉이 부족하거나 비정상적인 경우
+    "SKIP"을 반환한다. SKIP 결과는 메인 루프에서 CSV에 포함되지 않는다.
+
     Args:
         future_ohlcv: Time-Stepping 기준 시점 이후의 OHLCV 슬라이스.
         entry_price:  가상 진입 가격 (기준 시점 마지막 봉 종가).
@@ -472,15 +528,35 @@ def simulate_trade_from_data(
         stop_pct:     손절률 (양수 %).
 
     Returns:
-        {"result": "WIN"|"LOSS"|"TIMEOUT", "pnl_pct": float, "candles_held": int}
+        {"result": "WIN"|"LOSS"|"TIMEOUT"|"SKIP", "pnl_pct": float, "candles_held": int}
     """
+    # ── 기본 유효성 검사 ──────────────────────────────────────────────────────
     if not future_ohlcv or entry_price <= 0:
-        return {"result": "ERROR", "pnl_pct": 0.0, "candles_held": 0}
+        return {"result": "SKIP", "pnl_pct": 0.0, "candles_held": 0}
 
+    # ── 봉 데이터 유효성 필터 ────────────────────────────────────────────────
+    # 신규 상장·거래 정지 등으로 인한 비정상 봉 (high<low, 음수가 등) 제거
+    valid_ohlcv = [
+        c for c in future_ohlcv
+        if len(c) >= 5
+        and c[2] > 0 and c[3] > 0 and c[4] > 0  # high, low, close 모두 양수
+        and c[2] >= c[3]                           # high >= low (데이터 무결성)
+    ]
+
+    # ── 미래 봉 최소 개수 미달 — 타임아웃 또는 SKIP 처리 ────────────────────
+    if len(valid_ohlcv) < MIN_FUTURE_CANDLES:
+        if valid_ohlcv:
+            # 가용한 봉만으로 종가 기반 PnL 계산 후 TIMEOUT 처리
+            pnl = (valid_ohlcv[-1][4] - entry_price) / entry_price * 100
+            return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": len(valid_ohlcv)}
+        # 유효 봉이 아예 없으면 SKIP (CSV 제외 대상)
+        return {"result": "SKIP", "pnl_pct": 0.0, "candles_held": 0}
+
+    # ── 정상 시뮬레이션 ──────────────────────────────────────────────────────
     target_price = entry_price * (1 + target_pct / 100)
     stop_price   = entry_price * (1 - stop_pct  / 100)
 
-    for i, candle in enumerate(future_ohlcv):
+    for i, candle in enumerate(valid_ohlcv):
         high = candle[2]
         low  = candle[3]
         if high >= target_price:
@@ -489,9 +565,9 @@ def simulate_trade_from_data(
             return {"result": "LOSS", "pnl_pct": -stop_pct,   "candles_held": i + 1}
 
     # 타임아웃 — 마지막 봉 종가 기준 수익률
-    last_close = future_ohlcv[-1][4]
+    last_close = valid_ohlcv[-1][4]
     pnl = (last_close - entry_price) / entry_price * 100
-    return {"result": "TIMEOUT", "pnl_pct": pnl, "candles_held": len(future_ohlcv)}
+    return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": len(valid_ohlcv)}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -728,11 +804,27 @@ async def run_backtest(args: argparse.Namespace) -> None:
 
                     # 미래 봉 슬라이스: step_idx 이후 ~ step_idx + future_candles
                     future_ohlcv = all_ohlcv.get(symbol, [])[step_idx: step_idx + args.future_candles]
+
+                    # 미래 봉 사전 검증 — MIN_FUTURE_CANDLES 미달 시 조기 경고
+                    if len(future_ohlcv) < MIN_FUTURE_CANDLES:
+                        logger.warning(
+                            "[%s] 미래 봉 부족 (%d봉 < 최소 %d봉): %s — 시뮬레이션 스킵",
+                            model_id, len(future_ohlcv), MIN_FUTURE_CANDLES, symbol,
+                        )
+
                     sim = simulate_trade_from_data(
                         future_ohlcv, entry_price,
                         target_pct=pick["target_profit_pct"],
                         stop_pct=pick["stop_loss_pct"],
                     )
+
+                    # SKIP: 데이터 부족·비정상 봉 → 잔고 변동 없이 CSV에서 제외
+                    if sim["result"] == "SKIP":
+                        logger.warning(
+                            "[%s] 시뮬레이션 스킵: %s — 유효 미래 봉 없음 (신규 상장 또는 거래 정지 의심)",
+                            model_id, symbol,
+                        )
+                        continue
 
                     # ── 가상 시드 잔고 업데이트 ─────────────────────────────
                     current_balance = per_model[platform]["balance"]
