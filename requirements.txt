@@ -31,6 +31,6 @@ cryptography>=42.0.0
 pandas>=2.2.0
 openai>=1.0.0
 anthropic>=0.49.0
-google-generativeai>=0.8.0
+google-genai>=1.0.0        # Gemini 백테스터용 최신 SDK (구 google-generativeai와 다른 패키지)
 
 greenlet==3.3.2
