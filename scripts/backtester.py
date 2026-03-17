@@ -242,7 +242,7 @@ _SYSTEM_PROMPT = """\
     {
       "symbol":            "BTC/KRW",
       "score":             91,
-      "weight_pct":        25,
+      "weight_pct":        20,
       "reason":            "RSI 48 반등, MA20 지지 확인, ATR% 4.2% 반영 손절폭 7.5% / 직전 저항 5.0% 목표",
       "target_profit_pct": 5.0,
       "stop_loss_pct":     7.5
@@ -272,10 +272,9 @@ _SYSTEM_PROMPT = """\
    - 저항이 없고 추세가 강하면 최대 7.0%까지 허용
    - stop_loss_pct보다 낮더라도 괜찮다 — 높은 승률로 커버하는 전략임
 
-4. 포지션 사이징 — 보수적 비중:
-   - weight_pct 최대 30% 이하 (손절폭이 넓으므로 투입 비중을 반드시 줄여야 함)
-   - 2개 픽 시 합산 weight_pct가 50% 이하
-   - 확신이 낮거나 변동성이 높으면 weight_pct 10~20% 사용
+4. 포지션 사이징 — 고정 20% 비중 (절대 하드 룰):
+   - weight_pct는 시장 상황·점수·변동성·픽 수에 관계없이 반드시 **20.0**으로만 설정할 것
+   - 리스크 관리 및 현금 확보를 위한 고정 룰이므로 예외 없이 20.0만 허용 (증감 불가)
 
 5. 진입 조건 (모두 충족 시에만 픽):
    - score 90 이상 (절대 90 미만 진입 금지 — 진입 빈도를 낮춰야 한다)
@@ -496,9 +495,9 @@ def parse_picks(raw: str) -> list[dict]:
         raw_stop = abs(float(p.get("stop_loss_pct", 7.5) or 7.5))
         # 스나이퍼 v2 하드 하한: stop_loss_pct 7% 미만이면 강제 보정 (휩쏘 방어)
         stop_loss_pct = max(raw_stop, 7.0)
-        raw_weight = float(p.get("weight_pct", 0) or 0)
-        # 손절폭이 넓으므로 투입 비중 상한 30% 강제
-        weight_pct = min(raw_weight, 30.0)
+        # 포지션 사이징 하드 룰: weight_pct = 20.0 고정 (AI 응답값 무시)
+        # → 리스크 관리·현금 확보를 위해 시장 상황·점수와 무관하게 항상 20%
+        weight_pct = 20.0
         validated.append({
             "symbol":            symbol,
             "score":             score,
@@ -527,14 +526,15 @@ def simulate_trade_from_data(
     entry_price 기준으로 future_ohlcv의 각 봉 high/low를 순서대로 확인한다.
     동일 봉에서 복수 조건이 충족될 경우 WIN > BREAKEVEN > LOSS 우선순위를 적용한다.
 
-    [스마트 청산 로직 v4]
-      - BREAKEVEN (본절 이동):
-          High가 진입가+BREAKEVEN_TRIGGER_PCT(3.5%) 달성 시 breakeven_activated=True.
-          활성화 이후 Low가 진입가+BREAKEVEN_EXIT_PCT(0.5%) 이하로 내려오면 즉시 청산.
-          → 수익 구간 진입 후 되돌림 시 원금 보전. 기존 LOSS 조건보다 우선 적용.
-      - TIME EXIT (시간 청산):
-          TIME_EXIT_CANDLES(12봉 = 48시간) 경과 후 WIN/BREAKEVEN 미달 시
-          해당 봉 종가 기준 강제 TIMEOUT 청산. -8% 손절 위험 포지션 조기 정리.
+    [스마트 청산 로직 v5 — 반익반손 (Partial TP + 트레일링 스탑)]
+      - PARTIAL TP (반익): 목표가(+target_pct%) 도달 시 50% 물량 먼저 익절.
+          남은 50%의 트레일링 스탑을 본절가(+BREAKEVEN_EXIT_PCT%)로 상향 조정.
+          result는 "WIN"으로 표기, pnl_pct = (첫 50% PnL + 나머지 50% PnL) / 2.
+      - TRAILING STOP: 반익 완료 후 Low가 +BREAKEVEN_EXIT_PCT% 이하 → 나머지 50% 본절 청산.
+      - BREAKEVEN (전량 본절 청산): 반익 미완료 상태에서 High +BREAKEVEN_TRIGGER_PCT% 달성
+          후 Low +BREAKEVEN_EXIT_PCT% 이하 하락 시 전량 청산.
+      - TIME EXIT (시간 청산): TIME_EXIT_CANDLES봉 경과 시 잔여 포지션을 close 기준 청산.
+      - LOSS: 반익·본절 미활성 구간에서 원래 손절가 도달 시 전량 청산.
 
     신규 상장·거래 정지 등으로 미래 봉이 부족하거나 비정상적인 경우
     "SKIP"을 반환한다. SKIP 결과는 메인 루프에서 CSV에 포함되지 않는다.
@@ -577,39 +577,88 @@ def simulate_trade_from_data(
     breakeven_trigger_price = entry_price * (1 + BREAKEVEN_TRIGGER_PCT  / 100)
     breakeven_exit_price    = entry_price * (1 + BREAKEVEN_EXIT_PCT     / 100)
 
-    breakeven_activated = False  # 본절 이동 플래그
+    breakeven_activated = False  # 본절 이동 플래그 (전량 포지션 구간)
+    partial_tp_done     = False  # 반익(Partial TP) 완료 플래그
+    partial_tp_pnl      = 0.0   # 첫 50% 익절 PnL (%)
 
     for i, candle in enumerate(valid_ohlcv):
         high  = candle[2]
         low   = candle[3]
         close = candle[4]
 
-        # ── 본절 트리거 체크: 이번 봉 high가 진입가+3.5% 이상이면 활성화 ──────
-        if not breakeven_activated and high >= breakeven_trigger_price:
-            breakeven_activated = True
+        if not partial_tp_done:
+            # ── 전량 포지션 관리 구간 ───────────────────────────────────────
 
-        # ── [우선순위 1] WIN: 목표가 도달 ──────────────────────────────────────
-        if high >= target_price:
-            return {"result": "WIN", "pnl_pct": target_pct, "candles_held": i + 1}
+            # 본절 트리거 체크: 이번 봉 high가 진입가+3.5% 이상이면 활성화
+            if not breakeven_activated and high >= breakeven_trigger_price:
+                breakeven_activated = True
 
-        # ── [우선순위 2] BREAKEVEN: 본절 활성화 후 진입가+0.5% 이하 하락 ────────
-        # 수익 구간 진입 후 되돌림 — LOSS보다 높은 레벨(+0.5%)에서 선제 청산
-        if breakeven_activated and low <= breakeven_exit_price:
-            return {"result": "BREAKEVEN", "pnl_pct": BREAKEVEN_EXIT_PCT, "candles_held": i + 1}
+            # [우선순위 1] PARTIAL TP: 목표가 도달 → 50% 먼저 익절, 트레일링 스탑 상향
+            if high >= target_price:
+                partial_tp_done = True
+                partial_tp_pnl  = target_pct
+                # 같은 봉에서 트레일링 스탑(+0.5%)도 즉시 체크 (고변동 봉 방어)
+                if low <= breakeven_exit_price:
+                    second_pnl = BREAKEVEN_EXIT_PCT
+                    return {
+                        "result":       "WIN",
+                        "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
+                        "candles_held": i + 1,
+                    }
+                # 같은 봉이 TIME EXIT 봉이면 남은 50%를 close 기준으로 청산
+                if i == TIME_EXIT_CANDLES - 1:
+                    second_pnl = (close - entry_price) / entry_price * 100
+                    return {
+                        "result":       "WIN",
+                        "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
+                        "candles_held": i + 1,
+                    }
+                continue  # 남은 50% 트레일링 → 다음 봉부터 else 구간
 
-        # ── [우선순위 3] LOSS: 원래 손절선 (본절 미활성 구간에서만 발동) ─────────
-        # breakeven 활성화 이후에는 +0.5% 본절선이 실질적 스톱이므로 LOSS 불필요
-        if not breakeven_activated and low <= stop_price:
-            return {"result": "LOSS", "pnl_pct": -stop_pct, "candles_held": i + 1}
+            # [우선순위 2] BREAKEVEN: 본절 활성화 후 진입가+0.5% 이하 전량 청산
+            # (반익 미완료 상태에서만 — 반익 이후에는 트레일링 스탑이 담당)
+            if breakeven_activated and low <= breakeven_exit_price:
+                return {"result": "BREAKEVEN", "pnl_pct": BREAKEVEN_EXIT_PCT, "candles_held": i + 1}
 
-        # ── [우선순위 4] TIME EXIT: 48시간(12봉) 경과 → 방향성 미결정 강제 청산 ──
-        # 장기 타임아웃(-8% 위험)을 차단하고 12번째 봉 종가 기준 조기 정리
-        if i == TIME_EXIT_CANDLES - 1:
-            pnl = (close - entry_price) / entry_price * 100
-            return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": i + 1}
+            # [우선순위 3] LOSS: 원래 손절선 (본절·반익 미활성 구간에서만 발동)
+            if not breakeven_activated and low <= stop_price:
+                return {"result": "LOSS", "pnl_pct": -stop_pct, "candles_held": i + 1}
 
-    # ── 최종 타임아웃 (30봉 전체 경과 — TIME_EXIT 이후에도 청산 미발동 케이스) ──
+            # [우선순위 4] TIME EXIT: 48시간(12봉) 경과 → 전량 강제 청산
+            if i == TIME_EXIT_CANDLES - 1:
+                pnl = (close - entry_price) / entry_price * 100
+                return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": i + 1}
+
+        else:
+            # ── 반익 완료 후 남은 50% 트레일링 관리 구간 ──────────────────────
+
+            # 트레일링 스탑(+0.5%) 터치 → 남은 50% 본절 청산
+            if low <= breakeven_exit_price:
+                second_pnl = BREAKEVEN_EXIT_PCT
+                return {
+                    "result":       "WIN",
+                    "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
+                    "candles_held": i + 1,
+                }
+            # TIME EXIT 도달 → 남은 50%를 close 기준 청산
+            if i == TIME_EXIT_CANDLES - 1:
+                second_pnl = (close - entry_price) / entry_price * 100
+                return {
+                    "result":       "WIN",
+                    "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
+                    "candles_held": i + 1,
+                }
+
+    # ── 최종 타임아웃 (30봉 전체 소진) ───────────────────────────────────────
     last_close = valid_ohlcv[-1][4]
+    if partial_tp_done:
+        # 반익 완료 후 30봉까지 트레일링·TIME_EXIT 미발동 → 마지막 close로 나머지 50% 청산
+        second_pnl = (last_close - entry_price) / entry_price * 100
+        return {
+            "result":       "WIN",
+            "pnl_pct":      round((partial_tp_pnl + second_pnl) / 2, 4),
+            "candles_held": len(valid_ohlcv),
+        }
     pnl = (last_close - entry_price) / entry_price * 100
     return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": len(valid_ohlcv)}
 
