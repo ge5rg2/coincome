@@ -219,7 +219,7 @@ class GeminiAdapter:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 시스템 프롬프트 (스나이퍼 전략 v2 — Score 90+, 손절 7%+, BTC 국면 필터)
+# 시스템 프롬프트 (스나이퍼 전략 v3 — Score 90+, 손절 7%+, 목표 4~7%, BTC 국면 필터)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
@@ -235,14 +235,14 @@ _SYSTEM_PROMPT = """\
       "symbol":            "BTC/KRW",
       "score":             91,
       "weight_pct":        25,
-      "reason":            "RSI 48 반등, MA20 지지 확인, ATR% 4.2% 반영 손절폭 7.5% 설정",
-      "target_profit_pct": 12.0,
+      "reason":            "RSI 48 반등, MA20 지지 확인, ATR% 4.2% 반영 손절폭 7.5% / 직전 저항 5.0% 목표",
+      "target_profit_pct": 5.0,
       "stop_loss_pct":     7.5
     }
   ]
 }
 
-[핵심 매매 원칙 — 고승률 스나이퍼 v2]
+[핵심 매매 원칙 — 고승률 스나이퍼 v3]
 
 1. BTC 시장 국면 필터 (최우선 — 모든 원칙보다 우선):
    - 유저 프롬프트에 "⛔ [BTC 하락장 — 강제 관망 발동]" 표시가 있으면:
@@ -252,16 +252,17 @@ _SYSTEM_PROMPT = """\
    - BTC/KRW RSI14 < 45이면 알트코인 픽 극도로 자제
    - BTC/KRW 현재가가 MA20 아래에 있고 RSI14 < 50이면 알트코인 진입 금지
 
-2. 손절폭 — 휩쏘 방어 (핵심 변경):
+2. 손절폭 — 휩쏘 방어 (유지):
    - stop_loss_pct = ATR% × 2~3배 (최소 7% 이상 필수)
    - ATR% 3%대 기준: stop_loss_pct 7~9%
    - ATR% 5% 이상: stop_loss_pct 10~15%
    - stop_loss_pct 7% 미만으로 절대 설정하지 말 것 (좁은 손절 = 휩쏘 직격)
 
-3. 리스크-리워드:
-   - target_profit_pct는 stop_loss_pct의 최소 1.5배 이상
-   - 예: stop_loss_pct 7% → target_profit_pct 최소 10.5%
-   - 예: stop_loss_pct 10% → target_profit_pct 최소 15%
+3. 목표가 — 현실적 스윙 도달 범위:
+   - target_profit_pct는 4.0% ~ 7.0% 사이에서 직전 저항선을 고려해 설정
+   - 직전 고점·저항대가 4% 부근에 있으면 4.0~5.0% 목표 사용 (무리한 추가 상승 기대 금지)
+   - 저항이 없고 추세가 강하면 최대 7.0%까지 허용
+   - stop_loss_pct보다 낮더라도 괜찮다 — 높은 승률로 커버하는 전략임
 
 4. 포지션 사이징 — 보수적 비중:
    - weight_pct 최대 30% 이하 (손절폭이 넓으므로 투입 비중을 반드시 줄여야 함)
@@ -495,7 +496,7 @@ def parse_picks(raw: str) -> list[dict]:
             "score":             score,
             "weight_pct":        weight_pct,
             "reason":            str(p.get("reason", "")),
-            "target_profit_pct": abs(float(p.get("target_profit_pct", 12.0) or 12.0)),
+            "target_profit_pct": abs(float(p.get("target_profit_pct", 5.0) or 5.0)),
             "stop_loss_pct":     stop_loss_pct,
         })
         if len(validated) == 2:
@@ -992,8 +993,8 @@ def main() -> None:
     parser.add_argument(
         "--future-candles",
         type=int,
-        default=20,
-        help="매매 시뮬레이션용 미래 4h 봉 수",
+        default=30,
+        help="매매 시뮬레이션용 미래 4h 봉 수 (기본 30 = 120시간 = 5일)",
     )
     parser.add_argument(
         "--step",
