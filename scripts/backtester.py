@@ -220,8 +220,9 @@ class GeminiAdapter:
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
-너는 4시간 봉 기반의 스윙 트레이더야.
-제공된 Top 코인의 RSI·MA 지표, 가용 예산을 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
+너는 4시간 봉 기반의 고승률 스나이퍼 트레이더야.
+제공된 Top 코인의 RSI·MA·ATR 지표, 가용 예산을 분석해서 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
+확신이 없으면 picks 배열을 비워서 관망해도 된다.
 
 반드시 아래 JSON 형식으로만 응답해 (다른 텍스트 없음):
 {
@@ -231,18 +232,43 @@ _SYSTEM_PROMPT = """\
       "symbol":            "BTC/KRW",
       "score":             92,
       "weight_pct":        55,
-      "reason":            "RSI 42 반등 및 4h 20MA 지지 확인",
-      "target_profit_pct": 4.0,
-      "stop_loss_pct":     2.0
+      "reason":            "RSI 44 반등 및 4h 20MA 지지, ATR% 3.5%로 손절폭 확보",
+      "target_profit_pct": 6.0,
+      "stop_loss_pct":     4.5
     }
   ]
 }
 
-규칙:
-- score 80 미만 종목은 picks에 절대 포함하지 말 것
-- symbol은 "코인명/KRW" 형태로 작성 (예: BTC/KRW)
-- 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
-- 현재가 100 KRW 미만 동전주는 스킵
+[핵심 매매 원칙 — 고승률 스나이퍼]
+
+1. 손절폭 (휩쏘 방어):
+   - stop_loss_pct 최솟값: 3.5% (ATR%가 낮은 저변동성 시)
+   - 고변동성 (ATR% 3~5%): stop_loss_pct 5.0~7.0% 사용
+   - stop_loss_pct 3.5% 미만으로 절대 설정하지 말 것
+
+2. BTC 하락장 관망 룰:
+   - BTC/KRW RSI14 < 45이면 알트코인 픽 극도로 자제
+   - BTC/KRW RSI14 < 40이면 알트코인 picks 배열을 완전히 비울 것
+   - BTC가 MA20 아래에 있고 RSI14 < 50이면 알트코인 진입 금지
+
+3. 과매수 타점 회피:
+   - 대상 코인 RSI14 > 70이면 진입 패스 (과매수 구간)
+   - RSI14 60~70이면 매우 보수적으로 판단 (score 87 이상 필수)
+
+4. 진입 조건 (모두 충족 시에만 픽):
+   - score 85 이상
+   - RSI14 35~65 구간 (중립~반등 구간)
+   - MA20 지지 또는 돌파 확인
+   - 24h 거래대금 50억 KRW 이상 (유동성 확보)
+
+5. 리스크-리워드:
+   - target_profit_pct는 stop_loss_pct의 최소 1.5배 이상
+   - 예: stop_loss_pct 4.5% → target_profit_pct 최소 6.75%
+
+6. 일반 규칙:
+   - symbol은 "코인명/KRW" 형태로 작성 (예: BTC/KRW)
+   - 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
+   - 현재가 100 KRW 미만 동전주는 스킵
 """
 
 
@@ -406,15 +432,18 @@ def parse_picks(raw: str) -> list[dict]:
             score = int(p.get("score", 0) or 0)
         except (ValueError, TypeError):
             score = 0
-        if score < 80:
+        if score < 85:
             continue
+        raw_stop = abs(float(p.get("stop_loss_pct", 4.5) or 4.5))
+        # 스나이퍼 전략 하드 하한: stop_loss_pct 3.5% 미만이면 강제 보정
+        stop_loss_pct = max(raw_stop, 3.5)
         validated.append({
             "symbol":            symbol,
             "score":             score,
             "weight_pct":        float(p.get("weight_pct", 0) or 0),
             "reason":            str(p.get("reason", "")),
-            "target_profit_pct": abs(float(p.get("target_profit_pct", 3.0) or 3.0)),
-            "stop_loss_pct":     abs(float(p.get("stop_loss_pct",     2.0) or 2.0)),
+            "target_profit_pct": abs(float(p.get("target_profit_pct", 6.0) or 6.0)),
+            "stop_loss_pct":     stop_loss_pct,
         })
         if len(validated) == 2:
             break
@@ -488,6 +517,8 @@ def _print_model_summary(
     input_tokens: int,
     output_tokens: int,
     cost: float,
+    initial_balance: float = 1_000_000,
+    final_balance: float | None = None,
 ) -> None:
     wins     = sum(1 for r in rows if r["Sim_Result"] == "WIN")
     losses   = sum(1 for r in rows if r["Sim_Result"] == "LOSS")
@@ -498,6 +529,12 @@ def _print_model_summary(
     print(f"\n  ┌ 모델: {model_id}")
     print(f"  │ 픽 수: {total}  승={wins} 패={losses} 타임아웃={timeouts}  "
           f"승률={win_rate:.1f}%  평균PnL={avg_pnl:+.2f}%")
+    if final_balance is not None:
+        pnl_total = final_balance - initial_balance
+        pnl_sign  = "+" if pnl_total >= 0 else ""
+        roi       = pnl_total / initial_balance * 100 if initial_balance else 0.0
+        print(f"  │ 잔고: {initial_balance:,.0f} → {final_balance:,.0f} KRW  "
+              f"(총 손익금: {pnl_sign}{pnl_total:,.0f} KRW / ROI: {pnl_sign}{roi:.2f}%)")
     print(f"  │ 토큰: 입력={input_tokens:,}  출력={output_tokens:,}  비용=${cost:.6f}")
     print(f"  └{'─' * 53}")
 
@@ -605,9 +642,9 @@ async def run_backtest(args: argparse.Namespace) -> None:
             args.future_candles,
         )
 
-        # 모델별 누적 통계 초기화
+        # 모델별 누적 통계 초기화 (balance: 가상 시드 1M KRW 누적 잔고)
         per_model: dict[str, dict] = {
-            p: {"rows": [], "in_tok": 0, "out_tok": 0, "cost": 0.0}
+            p: {"rows": [], "in_tok": 0, "out_tok": 0, "cost": 0.0, "balance": args.budget}
             for p in platforms if p in api_keys
         }
         all_csv_rows: list[dict] = []
@@ -697,9 +734,18 @@ async def run_backtest(args: argparse.Namespace) -> None:
                         stop_pct=pick["stop_loss_pct"],
                     )
 
+                    # ── 가상 시드 잔고 업데이트 ─────────────────────────────
+                    current_balance = per_model[platform]["balance"]
+                    invested_krw    = current_balance * pick["weight_pct"] / 100
+                    pnl_krw         = invested_krw * sim["pnl_pct"] / 100
+                    per_model[platform]["balance"] += pnl_krw
+                    new_balance = per_model[platform]["balance"]
+
                     logger.info(
-                        "[결과] %s 시뮬레이션 완료 -> %s (%.2f%%) / 보유시간: %d봉",
+                        "[결과] %s 시뮬레이션 완료 -> %s (%.2f%%) / 보유시간: %d봉"
+                        " | 투자: %,.0f KRW / 손익: %+,.0f KRW / 잔고: %,.0f KRW",
                         symbol, sim["result"], sim["pnl_pct"], sim["candles_held"],
+                        invested_krw, pnl_krw, new_balance,
                     )
 
                     row = {
@@ -715,6 +761,9 @@ async def run_backtest(args: argparse.Namespace) -> None:
                         "Sim_Result":         sim["result"],
                         "Sim_PnL_Pct":        round(sim["pnl_pct"], 4),
                         "Candles_Held":       sim["candles_held"],
+                        "Invested_KRW":       round(invested_krw),
+                        "PnL_KRW":            round(pnl_krw),
+                        "Balance_KRW":        round(new_balance),
                         "Input_Tokens":       in_tok,
                         "Output_Tokens":      out_tok,
                         "Estimated_Cost_USD": round(per_pick_cost, 6),
@@ -762,7 +811,9 @@ async def run_backtest(args: argparse.Namespace) -> None:
             for platform, stats in per_model.items():
                 model_id = ADAPTER_MAP[platform](api_keys[platform]).model
                 _print_model_summary(
-                    model_id, stats["rows"], stats["in_tok"], stats["out_tok"], stats["cost"]
+                    model_id, stats["rows"], stats["in_tok"], stats["out_tok"], stats["cost"],
+                    initial_balance=args.budget,
+                    final_balance=stats["balance"],
                 )
             print(f"{sep}")
 
@@ -785,6 +836,20 @@ async def run_backtest(args: argparse.Namespace) -> None:
         print(f"  {'타임아웃     :':<20} {timeouts}회")
         print(f"  {'승률         :':<20} {win_rate:.1f}%")
         print(f"  {'평균 수익률  :':<20} {avg_pnl:+.2f}%")
+        print(f"{sep}")
+        print("  [ 가상 시드 잔고 추적 (모델별) ]")
+        print(f"  {'초기 시드    :':<20} {args.budget:,.0f} KRW")
+        for platform, stats in per_model.items():
+            model_id    = ADAPTER_MAP[platform](api_keys[platform]).model
+            final_bal   = stats["balance"]
+            pnl_total   = final_bal - args.budget
+            pnl_sign    = "+" if pnl_total >= 0 else ""
+            roi         = pnl_total / args.budget * 100 if args.budget else 0.0
+            print(
+                f"  {model_id:<22}  "
+                f"{args.budget:>12,.0f} → {final_bal:>12,.0f} KRW  "
+                f"({pnl_sign}{pnl_total:,.0f} KRW / ROI {pnl_sign}{roi:.2f}%)"
+            )
         print(f"{sep}")
         print("  [ AI 토큰 사용량 ]")
         print(f"  {'총 입력 토큰 :':<20} {total_in:,}")
