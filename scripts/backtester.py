@@ -90,7 +90,7 @@ class OpenAIAdapter:
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=700,
+            max_completion_tokens=700,  # gpt-5+ 계열: max_tokens → max_completion_tokens
         )
         content = response.choices[0].message.content or "{}"
         usage   = response.usage
