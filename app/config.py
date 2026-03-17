@@ -28,7 +28,10 @@ class Settings(BaseSettings):
     # 업비트 API 키 IP 화이트리스트에 등록할 서버 공인 IP
     server_ip: str = "0.0.0.0"
 
-    # OpenAI API 키 (AI 자동 매매 펀드 매니저용)
+    # Anthropic API 키 (AI 자동 매매 펀드 매니저용 — claude-sonnet-4-6 채택)
+    anthropic_api_key: str = ""
+
+    # OpenAI API 키 (백테스트 비교용 — 운영 AI는 Anthropic 사용)
     openai_api_key: str = ""
 
 

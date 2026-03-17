@@ -1,9 +1,11 @@
 """
-AITraderService: OpenAI GPT-4o-mini 기반 코인 종목 분석·픽 서비스.
+AITraderService: Anthropic claude-sonnet-4-6 기반 코인 종목 분석·픽 서비스.
+
+백테스트 3종 LLM 벤치마크 결과 Claude가 지시사항 준수율·수익률 모두 1위로 채택.
 
 analyze_market() 호출 흐름:
   1. MarketDataManager 캐시 데이터 + 가용 예산 → 유저 프롬프트 텍스트로 직렬화
-  2. GPT-4o-mini 에 system·user 프롬프트 전송 (JSON 출력 강제)
+  2. claude-sonnet-4-6 에 system·user 프롬프트 전송 (JSON 출력 프롬프트 강제)
   3. 응답 JSON 파싱 → score ≥ 80 필터 · 보유 코인 제외 · 최대 2개 제한 후 반환
 
 반환 형식 (analyze_market):
@@ -50,7 +52,7 @@ from __future__ import annotations
 import json
 import logging
 
-from openai import AsyncOpenAI
+import anthropic
 
 from app.config import settings
 from app.utils.format import format_krw_price
@@ -274,15 +276,18 @@ UPDATE 판단 기준 (방어적 갱신):
 # 서비스 클래스
 # ------------------------------------------------------------------
 
+_CLAUDE_MODEL = "claude-sonnet-4-6"  # 벤치마크 1위 채택 모델
+
+
 class AITraderService:
-    """OpenAI를 통해 코인 종목을 분석하고 매수 픽을 반환하는 서비스.
+    """Anthropic Claude를 통해 코인 종목을 분석하고 매수 픽을 반환하는 서비스.
 
     Attributes:
-        _client: AsyncOpenAI 클라이언트 인스턴스.
+        _client: anthropic.AsyncAnthropic 클라이언트 인스턴스.
     """
 
     def __init__(self) -> None:
-        self._client = AsyncOpenAI(api_key=settings.openai_api_key)
+        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     @staticmethod
     def _empty_analysis(summary: str) -> dict:
@@ -318,9 +323,9 @@ class AITraderService:
                 "마켓 데이터 캐시가 아직 초기화되지 않아 분석을 수행하지 못했습니다."
             )
 
-        if not settings.openai_api_key:
-            logger.error("AITraderService: OPENAI_API_KEY 미설정")
-            return self._empty_analysis("OpenAI API 키가 설정되지 않아 분석을 수행하지 못했습니다.")
+        if not settings.anthropic_api_key:
+            logger.error("AITraderService: ANTHROPIC_API_KEY 미설정")
+            return self._empty_analysis("Anthropic API 키가 설정되지 않아 분석을 수행하지 못했습니다.")
 
         # ── trade_style 분기 설정 ─────────────────────────────────────
         is_scalping = trade_style == "SCALPING"
@@ -382,23 +387,20 @@ class AITraderService:
             trade_style, available_krw, user_prompt,
         )
 
-        # ── OpenAI 호출 ───────────────────────────────────────────────
+        # ── Anthropic Claude 호출 ─────────────────────────────────────
         try:
-            response = await self._client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_prompt},
-                ],
+            response = await self._client.messages.create(
+                model=_CLAUDE_MODEL,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
                 temperature=temperature,
                 max_tokens=700,
             )
         except Exception as exc:
-            logger.error("AITraderService OpenAI 호출 실패: %s", exc)
+            logger.error("AITraderService Anthropic 호출 실패: %s", exc)
             return self._empty_analysis(f"AI 분석 중 오류가 발생했습니다: {exc}")
 
-        raw = response.choices[0].message.content or "{}"
+        raw = response.content[0].text if response.content else "{}"
 
         # ── [AI DEBUG - OUTPUT] 디버깅용 원본 응답 로그 ──────────────
         logger.info(
@@ -406,9 +408,14 @@ class AITraderService:
             trade_style, raw,
         )
 
-        # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
+        # ── 응답 파싱 및 안전 검증 (마크다운 펜스 제거 후 JSON 파싱) ──
         try:
-            result = json.loads(raw)
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            result = json.loads(text.strip())
         except json.JSONDecodeError as exc:
             logger.error("AITraderService JSON 파싱 실패: %s | raw=%s", exc, raw)
             return self._empty_analysis("AI 응답 파싱에 실패했습니다.")
@@ -502,8 +509,8 @@ class AITraderService:
         if not positions_data:
             return []
 
-        if not settings.openai_api_key:
-            logger.error("AITraderService: OPENAI_API_KEY 미설정")
+        if not settings.anthropic_api_key:
+            logger.error("AITraderService: ANTHROPIC_API_KEY 미설정")
             return []
 
         is_scalping = trade_style == "SCALPING"
@@ -546,28 +553,30 @@ class AITraderService:
         user_prompt = "\n".join(lines)
         logger.debug("AITraderService(review) 프롬프트:\n%s", user_prompt)
 
-        # ── OpenAI 호출 ───────────────────────────────────────────────
+        # ── Anthropic Claude 호출 ─────────────────────────────────────
         try:
-            response = await self._client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_prompt},
-                ],
+            response = await self._client.messages.create(
+                model=_CLAUDE_MODEL,
+                system=_REVIEW_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_prompt}],
                 temperature=0.2,
                 max_tokens=600,
             )
         except Exception as exc:
-            logger.error("AITraderService(review) OpenAI 호출 실패: %s", exc)
+            logger.error("AITraderService(review) Anthropic 호출 실패: %s", exc)
             return []
 
-        raw = response.choices[0].message.content or "{}"
+        raw = response.content[0].text if response.content else "{}"
         logger.debug("AITraderService(review) 응답: %s", raw)
 
-        # ── 응답 파싱 및 안전 검증 ────────────────────────────────────
+        # ── 응답 파싱 및 안전 검증 (마크다운 펜스 제거 후 JSON 파싱) ──
         try:
-            result = json.loads(raw)
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("```")[1]
+                if text.startswith("json"):
+                    text = text[4:]
+            result = json.loads(text.strip())
         except json.JSONDecodeError as exc:
             logger.error("AITraderService(review) JSON 파싱 실패: %s | raw=%s", exc, raw)
             return []
