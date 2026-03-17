@@ -76,6 +76,9 @@ TOKEN_PRICE_TABLE: dict[str, tuple[float, float]] = {
 # 결과 저장 디렉터리
 RESULT_DIR = Path(__file__).parent.parent / ".result"
 
+# OHLCV 로컬 캐시 디렉터리 (Rate Limit 방지 + 반복 실행 속도 향상)
+CACHE_DIR = Path(__file__).parent.parent / ".cache" / "ohlcv"
+
 # Time-Stepping 최소 워밍업 봉 수 (RSI14 + MA20 계산을 위한 최소 데이터)
 WARMUP_CANDLES = 21
 
@@ -95,6 +98,65 @@ TIME_EXIT_CANDLES: int = 18
 # 동일 픽·동일 시뮬레이션 결과를 두 지갑에서 각각 계산.
 SNIPER_WEIGHT_PCT: float = 20.0   # 🛡️ 인텔리전트 스나이퍼 — 안전 모드 (잔고의 20%)
 BEAST_WEIGHT_PCT:  float = 70.0   # 🔥 야수의 심장       — 공격 모드 (잔고의 70%)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# OHLCV 로컬 캐시 헬퍼 (스마트 캐싱 — Rate Limit 방지 + 반복 실행 속도 향상)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _cache_path(symbol: str, timeframe: str = "4h") -> Path:
+    """심볼·타임프레임에 대응하는 캐시 파일 경로를 반환한다.
+
+    슬래시(/)를 언더스코어(_)로 치환해 파일시스템 호환성을 확보한다.
+    예: "BTC/KRW" + "4h" → CACHE_DIR/BTC_KRW_4h.json
+    """
+    safe_sym = symbol.replace("/", "_")
+    return CACHE_DIR / f"{safe_sym}_{timeframe}.json"
+
+
+def _load_cache(symbol: str, timeframe: str, min_count: int) -> list[list] | None:
+    """로컬 캐시에서 OHLCV 데이터를 로드한다.
+
+    캐시 파일이 존재하고 저장된 봉 수가 min_count 이상이면 데이터를 반환한다.
+    파일 미존재·JSON 파싱 오류·봉 수 미달 시 None을 반환해 API 재수집을 유도한다.
+
+    Args:
+        symbol:    코인 심볼 (예: "BTC/KRW")
+        timeframe: 캔들 타임프레임 (예: "4h")
+        min_count: 캐시 유효 판정에 필요한 최소 봉 수
+
+    Returns:
+        OHLCV 리스트 또는 None (캐시 미스)
+    """
+    path = _cache_path(symbol, timeframe)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list) and len(data) >= min_count:
+            return data
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _save_cache(symbol: str, timeframe: str, ohlcv: list[list]) -> None:
+    """OHLCV 데이터를 로컬 캐시 파일에 저장한다.
+
+    CACHE_DIR이 없으면 자동 생성한다.
+    쓰기 실패 시 경고 로그만 출력하고 진행을 중단하지 않는다.
+
+    Args:
+        symbol:    코인 심볼 (예: "BTC/KRW")
+        timeframe: 캔들 타임프레임 (예: "4h")
+        ohlcv:     저장할 OHLCV 데이터
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _cache_path(symbol, timeframe)
+    try:
+        path.write_text(json.dumps(ohlcv), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("캐시 저장 실패 (%s): %s", path, exc)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -752,17 +814,39 @@ async def run_backtest(args: argparse.Namespace) -> None:
         )
 
         all_ohlcv: dict[str, list[list]] = {}
+        cache_hits = 0
         for i, sym in enumerate(top_symbols, 1):
             try:
-                ohlcv = await exchange.fetch_ohlcv(sym, timeframe="4h", limit=total_fetch)
-                if len(ohlcv) >= WARMUP_CANDLES + args.future_candles:
-                    all_ohlcv[sym] = ohlcv
+                ohlcv: list[list] | None = None
+
+                # ── 캐시 우선 로드 (--force-fetch 미지정 시) ──────────────────
+                if not args.force_fetch:
+                    ohlcv = _load_cache(sym, "4h", total_fetch)
+                    if ohlcv is not None:
+                        cache_hits += 1
+                        logger.debug(
+                            "[캐시]  %2d/%d  %-12s: %d봉 (로컬 캐시)",
+                            i, len(top_symbols), sym, len(ohlcv),
+                        )
+
+                # ── 캐시 미스 또는 force-fetch → API 호출 후 캐시 저장 ────────
+                if ohlcv is None:
+                    ohlcv = await exchange.fetch_ohlcv(sym, timeframe="4h", limit=total_fetch)
+                    _save_cache(sym, "4h", ohlcv)
                     logger.debug(
-                        "[데이터 수집]  %2d/%d  %-12s: %d봉",
+                        "[API]   %2d/%d  %-12s: %d봉 (신규 수집 → 캐시 저장)",
                         i, len(top_symbols), sym, len(ohlcv),
                     )
+
+                if len(ohlcv) >= WARMUP_CANDLES + args.future_candles:
+                    all_ohlcv[sym] = ohlcv
             except Exception as exc:
                 logger.warning("[데이터 수집] %s OHLCV 수집 실패: %s", sym, exc)
+
+        logger.info(
+            "[데이터 수집] 캐시 히트: %d/%d개 (API 호출 절감)",
+            cache_hits, len(top_symbols),
+        )
 
         logger.info(
             "[데이터 수집] 완료 — 유효 심볼 %d개 / 요청 %d개",
@@ -1124,8 +1208,14 @@ def main() -> None:
     parser.add_argument(
         "--candles",
         type=int,
-        default=200,
-        help="지표 계산용 과거 4h 봉 수 (분석 기간)",
+        default=1000,
+        help="지표 계산용 과거 4h 봉 수 (분석 기간, 기본 1000 ≈ 167일치)",
+    )
+    parser.add_argument(
+        "--force-fetch",
+        action="store_true",
+        default=False,
+        help="캐시를 무시하고 API에서 새로 OHLCV 데이터를 수집합니다.",
     )
     parser.add_argument(
         "--future-candles",
