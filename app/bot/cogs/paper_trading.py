@@ -73,24 +73,30 @@ class PaperModeSelect(discord.ui.Select):
 
 
 class PaperStyleSelect(discord.ui.Select):
-    """투자 성향(SWING / SCALPING) 드롭다운."""
+    """투자 비중 모드(SNIPER / BEAST) 드롭다운.
+
+    v7 알트코인 전략 기준:
+      SNIPER — 시드 20% 투입, MDD -19% (안전 모드)
+      BEAST  — 시드 70% 투입, MDD -53% (공격 모드)
+    두 모드 모두 동일한 v7 4h 엔진을 사용한다.
+    """
 
     def __init__(self, current_style: str) -> None:
         options = [
             discord.SelectOption(
-                label="📊 SWING — 4h 보수 스윙",
-                value="SWING",
-                description="4시간 봉 RSI·MA 기반 보수적 스윙 매매",
-                default=current_style == "SWING",
+                label="🛡️ SNIPER — 시드 20% 안전 모드",
+                value="SNIPER",
+                description="MDD -19% | 4h 모멘텀 돌파 | 알트코인 집중",
+                default=current_style in ("SNIPER", "SWING"),
             ),
             discord.SelectOption(
-                label="⚡ SCALPING — 1h 공격 단타",
-                value="SCALPING",
-                description="1시간 봉 모멘텀 기반 빠른 단타 매매",
-                default=current_style == "SCALPING",
+                label="🔥 BEAST — 시드 70% 공격 모드",
+                value="BEAST",
+                description="MDD -53% | 동일 v7 전략, 고비중 투입",
+                default=current_style in ("BEAST", "SCALPING"),
             ),
         ]
-        super().__init__(placeholder="투자 성향을 선택하세요", options=options, row=1)
+        super().__init__(placeholder="투자 비중 모드를 선택하세요", options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self.view.style_value = self.values[0]
@@ -109,14 +115,14 @@ class PaperAISettingView(discord.ui.View):
 
     Attributes:
         mode_value:  현재 선택된 모드 ("ON" / "OFF").
-        style_value: 현재 선택된 투자 성향 ("SWING" / "SCALPING").
+        style_value: 현재 선택된 투자 비중 모드 ("SNIPER" / "BEAST").
     """
 
     def __init__(self, user: User) -> None:
         super().__init__(timeout=180)
         self._user = user
         self.mode_value: str = "ON" if user.ai_paper_mode_enabled else "OFF"
-        self.style_value: str = getattr(user, "ai_trade_style", "SWING")
+        self.style_value: str = getattr(user, "ai_trade_style", "SNIPER")
 
         self.add_item(PaperModeSelect(current_enabled=user.ai_paper_mode_enabled))
         self.add_item(PaperStyleSelect(current_style=self.style_value))
@@ -172,7 +178,7 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 종목 
 
     Args:
         user_id:             Discord 사용자 ID.
-        style:               "SWING" 또는 "SCALPING" (Step 1 에서 선택).
+        style:               "SNIPER" 또는 "BEAST" (Step 1 에서 선택, 하위 호환: "SWING"/"SCALPING").
         current_max_coins:   현재 최대 동시 보유 종목 수 DB 값 (pre-fill 용).
         current_virtual_krw: 현재 가상 잔고 (완료 Embed 표시용).
     """
@@ -236,32 +242,52 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 종목 
             self._user_id, max_coins, self._style,
         )
 
-        # ── 완료 Embed 반환 ───────────────────────────────────────────
-        style_label = "📊 스윙 (4h 봉)" if self._style == "SWING" else "⚡ 단타 (1h 봉)"
+        # ── 모드별 동적 Embed 생성 (SNIPER / BEAST 분기) ─────────────
+        if self._style in ("SNIPER", "SWING"):
+            embed_title = "🛡️ 인텔리전트 스나이퍼 모드 가동"
+            embed_desc = (
+                "가용 시드의 **20%** 투입. "
+                "MDD(최대 낙폭)를 최소화(-19%)하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
+            )
+            embed_color = discord.Color.blue()
+        else:  # BEAST / SCALPING (하위 호환)
+            embed_title = "🔥 야수의 심장 모드 가동"
+            embed_desc = (
+                "가용 시드의 **70%** 투입. "
+                "높은 MDD(-53%)를 감수하고 폭발적인 수익을 노리는 "
+                "**하이리스크 하이리턴 공격 모드**입니다."
+            )
+            embed_color = discord.Color.red()
+
         embed = discord.Embed(
-            title="🎮 AI 모의투자 설정 완료",
-            color=discord.Color.purple(),
+            title=embed_title,
+            description=embed_desc,
+            color=embed_color,
         )
         embed.add_field(name="AI 모의투자", value="✅ 활성화", inline=True)
         embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-        embed.add_field(name="투자 성향", value=style_label, inline=True)
         embed.add_field(name="💰 현재 가상 잔고", value=f"{self._virtual_krw:,.0f} KRW", inline=True)
+        # ── 공통 엔진(v7 전략) 설명 필드 ─────────────────────────────
+        embed.add_field(
+            name="⚙️ 공통 엔진 — v7 알트코인 전략",
+            value=(
+                "**엔진:** v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
+                "**손익비:** 1.5:1 강제 (목표 익절 **6.0%** / 기계적 손절 **4.0%**)\n"
+                "**필터링:** 휩쏘 방지를 위해 무거운 메이저 코인(BTC·ETH 등) 거래 차단"
+            ),
+            inline=False,
+        )
         embed.add_field(
             name="📌 안내",
             value=(
                 "다음 AI 스케줄러 실행 시 **가상 잔고**로 종목을 선택하고 자동 매수합니다.\n"
-                "매수 금액은 AI가 종목별 **매력도·비중에 따라 자동 산정**합니다.\n"
                 "실제 업비트 API 키는 필요하지 않습니다.\n"
                 "매매 성과는 `/ai통계`에서 확인하세요."
             ),
             inline=False,
         )
         next_time = get_next_run_time_for_style(self._style)
-        schedule_desc = (
-            "매시 정각 실행 (1h 봉 기준 단타)" if self._style == "SCALPING"
-            else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
-        )
-        embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | {schedule_desc}")
+        embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | 01·05·09·13·17·21시 실행 (4h 봉 기준)")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -301,8 +327,12 @@ class PaperTradingCog(commands.Cog):
                 await db.commit()
                 await db.refresh(user)
 
-        current_style = getattr(user, "ai_trade_style", "SWING")
-        style_label = "⚡ 단타 (1h 봉)" if current_style == "SCALPING" else "📊 스윙 (4h 봉)"
+        current_style = getattr(user, "ai_trade_style", "SNIPER")
+        style_label = (
+            "🔥 야수 모드 (BEAST, 70%)"
+            if current_style in ("BEAST", "SCALPING")
+            else "🛡️ 스나이퍼 모드 (SNIPER, 20%)"
+        )
         embed = discord.Embed(
             title="🎮 AI 모의투자 설정",
             description=(

@@ -91,24 +91,30 @@ class ModeSelect(discord.ui.Select):
 
 
 class StyleSelect(discord.ui.Select):
-    """투자 성향(SWING / SCALPING) 드롭다운."""
+    """투자 비중 모드(SNIPER / BEAST) 드롭다운.
+
+    v7 알트코인 전략 기준:
+      SNIPER — 시드 20% 투입, MDD -19% (안전 모드)
+      BEAST  — 시드 70% 투입, MDD -53% (공격 모드)
+    두 모드 모두 동일한 v7 4h 엔진을 사용한다.
+    """
 
     def __init__(self, current_style: str) -> None:
         options = [
             discord.SelectOption(
-                label="📊 SWING — 4h 보수 스윙",
-                value="SWING",
-                description="4시간 봉 RSI·MA 기반 보수적 스윙 매매",
-                default=current_style == "SWING",
+                label="🛡️ SNIPER — 시드 20% 안전 모드",
+                value="SNIPER",
+                description="MDD -19% | 4h 모멘텀 돌파 | 알트코인 집중",
+                default=current_style in ("SNIPER", "SWING"),
             ),
             discord.SelectOption(
-                label="⚡ SCALPING — 1h 공격 단타",
-                value="SCALPING",
-                description="1시간 봉 모멘텀 기반 빠른 단타 매매",
-                default=current_style == "SCALPING",
+                label="🔥 BEAST — 시드 70% 공격 모드",
+                value="BEAST",
+                description="MDD -53% | 동일 v7 전략, 고비중 투입",
+                default=current_style in ("BEAST", "SCALPING"),
             ),
         ]
-        super().__init__(placeholder="투자 성향을 선택하세요", options=options, row=1)
+        super().__init__(placeholder="투자 비중 모드를 선택하세요", options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction) -> None:
         self.view.style_value = self.values[0]
@@ -127,7 +133,7 @@ class AISettingView(discord.ui.View):
 
     Attributes:
         mode_value:  현재 선택된 AI 모드 ("ON" / "OFF").
-        style_value: 현재 선택된 투자 성향 ("SWING" / "SCALPING").
+        style_value: 현재 선택된 투자 비중 모드 ("SNIPER" / "BEAST").
     """
 
     def __init__(self, user: User) -> None:
@@ -135,7 +141,7 @@ class AISettingView(discord.ui.View):
         self._user = user
         # Select 콜백이 업데이트할 인스턴스 변수 (초기값 = 기존 DB 설정)
         self.mode_value: str = "ON" if user.ai_mode_enabled else "OFF"
-        self.style_value: str = getattr(user, "ai_trade_style", "SWING")
+        self.style_value: str = getattr(user, "ai_trade_style", "SNIPER")
 
         self.add_item(ModeSelect(current_enabled=user.ai_mode_enabled))
         self.add_item(StyleSelect(current_style=self.style_value))
@@ -168,7 +174,7 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
     Args:
         user_id:           Discord 사용자 ID.
         mode:              "ON" 또는 "OFF" (Step 1 에서 선택).
-        style:             "SWING" 또는 "SCALPING" (Step 1 에서 선택).
+        style:             "SNIPER" 또는 "BEAST" (Step 1 에서 선택, 하위 호환: "SWING"/"SCALPING").
         current_amount:    현재 DB 값 (pre-fill 용).
         current_max_coins: 현재 DB 값 (pre-fill 용).
     """
@@ -287,29 +293,75 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 금액 설정"):
             self._user_id, enabled, amount, max_coins, self._style, budget,
         )
 
-        # ── 완료 Embed 반환 ───────────────────────────────────────────
-        status = "✅ 활성화" if enabled else "⏸️ 비활성화"
-        style_label = "📊 스윙 (4h 봉)" if self._style == "SWING" else "⚡ 단타 (1h 봉)"
-        embed = discord.Embed(
-            title="🤖 AI 실전 자동 매매 설정 완료",
-            color=discord.Color.green() if enabled else discord.Color.greyple(),
-        )
-        embed.add_field(name="AI 모드", value=status, inline=True)
-        embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
-        embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-        embed.add_field(name="투자 성향", value=style_label, inline=True)
-        budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
-        embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
-
-        if enabled:
-            next_time = get_next_run_time_for_style(self._style)
-            schedule_desc = (
-                "매시 정각 실행 (1h 봉 기준 단타)" if self._style == "SCALPING"
-                else "01·05·09·13·17·21시 실행 (4h 봉 기준 스윙)"
+        # ── 모드별 동적 Embed 생성 (SNIPER / BEAST 분기) ─────────────
+        if not enabled:
+            # OFF 선택: 간단한 비활성화 확인 Embed
+            embed = discord.Embed(
+                title="⏸️ AI 실전 자동 매매 비활성화",
+                description="신규 AI 매수가 중단됩니다. 기존 실행 중인 워커는 계속 동작합니다.",
+                color=discord.Color.greyple(),
             )
-            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | {schedule_desc}")
-        else:
+            embed.add_field(name="AI 모드", value="⏸️ 비활성화", inline=True)
+            embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
+            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
+            budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
+            embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
             embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
+        elif self._style in ("SNIPER", "SWING"):
+            # SNIPER 모드 ON
+            embed = discord.Embed(
+                title="🛡️ 인텔리전트 스나이퍼 모드 가동",
+                description=(
+                    "가용 시드의 **20%** 투입. "
+                    "MDD(최대 낙폭)를 최소화(-19%)하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
+                ),
+                color=discord.Color.blue(),
+            )
+            embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
+            embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
+            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
+            budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
+            embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
+            # ── 공통 엔진(v7 전략) 설명 필드 ─────────────────────────
+            embed.add_field(
+                name="⚙️ 공통 엔진 — v7 알트코인 전략",
+                value=(
+                    "**엔진:** v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
+                    "**손익비:** 1.5:1 강제 (목표 익절 **6.0%** / 기계적 손절 **4.0%**)\n"
+                    "**필터링:** 휩쏘 방지를 위해 무거운 메이저 코인(BTC·ETH 등) 거래 차단"
+                ),
+                inline=False,
+            )
+            next_time = get_next_run_time_for_style(self._style)
+            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | 01·05·09·13·17·21시 실행 (4h 봉 기준)")
+        else:
+            # BEAST / SCALPING 모드 ON (하위 호환)
+            embed = discord.Embed(
+                title="🔥 야수의 심장 모드 가동",
+                description=(
+                    "가용 시드의 **70%** 투입. "
+                    "높은 MDD(-53%)를 감수하고 폭발적인 수익을 노리는 "
+                    "**하이리스크 하이리턴 공격 모드**입니다."
+                ),
+                color=discord.Color.red(),
+            )
+            embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
+            embed.add_field(name="1회 매수 금액", value=f"{amount:,} KRW", inline=True)
+            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
+            budget_str = f"{budget:,} KRW" if budget > 0 else "제한 없음 (잔고 전액)"
+            embed.add_field(name="AI 운용 예산", value=budget_str, inline=True)
+            # ── 공통 엔진(v7 전략) 설명 필드 ─────────────────────────
+            embed.add_field(
+                name="⚙️ 공통 엔진 — v7 알트코인 전략",
+                value=(
+                    "**엔진:** v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
+                    "**손익비:** 1.5:1 강제 (목표 익절 **6.0%** / 기계적 손절 **4.0%**)\n"
+                    "**필터링:** 휩쏘 방지를 위해 무거운 메이저 코인(BTC·ETH 등) 거래 차단"
+                ),
+                inline=False,
+            )
+            next_time = get_next_run_time_for_style(self._style)
+            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | 01·05·09·13·17·21시 실행 (4h 봉 기준)")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -500,8 +552,12 @@ class AITradingCog(commands.Cog):
             return
 
         # ── 현재 설정값 요약 Embed + View 표시 ───────────────────────
-        current_style = getattr(user, "ai_trade_style", "SWING")
-        style_label = "⚡ 단타 (1h 봉)" if current_style == "SCALPING" else "📊 스윙 (4h 봉)"
+        current_style = getattr(user, "ai_trade_style", "SNIPER")
+        style_label = (
+            "🔥 야수 모드 (BEAST, 70%)"
+            if current_style in ("BEAST", "SCALPING")
+            else "🛡️ 스나이퍼 모드 (SNIPER, 20%)"
+        )
         embed = discord.Embed(
             title="🤖 AI 실전 자동 매매 설정",
             description=(
