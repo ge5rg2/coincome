@@ -262,44 +262,43 @@ coincome/
 
 `scripts/backtester.py` — OpenAI / Anthropic / Gemini 3종 LLM 성능 비교
 
-> ⚠️ **현재 검증 가능 모델: Gemini 전용**
-> OpenAI(`gpt-5.4`)와 Anthropic(`claude-sonnet-4-6`)은 현재 API 키 미확보 상태로
-> 실행·검증 불가. 테스트는 반드시 `--model gemini` 옵션으로 진행할 것.
+### 모델 구성
 
-### 모델 구성 및 검증 상태
+| 어댑터 | 모델 ID | JSON 강제 방식 |
+|---|---|---|
+| `OpenAIAdapter` | `gpt-5.4` | `response_format={"type": "json_object"}` |
+| `AnthropicAdapter` | `claude-sonnet-4-6` | 프롬프트 JSON 지시 + fallback 파서 |
+| `GeminiAdapter` | `gemini-3.1-pro-preview` | `GenerateContentConfig(response_mime_type="application/json")` |
 
-| 어댑터 | 모델 ID | JSON 강제 방식 | 검증 상태 |
-|---|---|---|---|
-| `OpenAIAdapter` | `gpt-5.4` | `response_format={"type": "json_object"}` | ❌ API 키 미확보 |
-| `AnthropicAdapter` | `claude-sonnet-4-6` | 프롬프트 JSON 지시 + fallback 파서 | ❌ API 키 미확보 |
-| `GeminiAdapter` | `gemini-3.1-pro-preview` | `GenerateContentConfig(response_mime_type="application/json")` | ✅ 검증 가능 |
-
-### 테스트 절차 (Gemini 전용)
+### 테스트 절차
 
 ```bash
-# 1. 환경변수 설정
-export GEMINI_API_KEY=...   # .env 파일에 있으면 자동 로드됨
+# 1. 환경변수 설정 (.env 파일에 있으면 자동 로드됨)
+export OPENAI_API_KEY=...
+export ANTHROPIC_API_KEY=...
+export GEMINI_API_KEY=...
 
-# 2. 기본 테스트 (단기 검증용 — 빠른 실행)
-python scripts/backtester.py --model gemini --candles 100 --step 12 --top 20
+# 2. 단기 검증 (빠른 실행 — 전략 동작 확인용)
+python scripts/backtester.py --model all --candles 100 --step 12 --top 20
 
-# 3. 정식 백테스트 (전략 성능 측정용)
-python scripts/backtester.py --model gemini --candles 200 --step 6 --top 30
+# 3. 정식 백테스트 (3개 모델 비교 — 전략 성능 측정용)
+python scripts/backtester.py --model all --candles 200 --step 6 --top 30
 
-# 4. 가상 시드 조정 테스트
-python scripts/backtester.py --model gemini --candles 200 --budget 500000
+# 4. 단일 모델 실행
+python scripts/backtester.py --model gemini --candles 200 --step 6
+
+# 5. 가상 시드 조정
+python scripts/backtester.py --model all --candles 200 --budget 500000
 ```
-
-> OpenAI / Anthropic API 키 확보 후에는 `--model all` 또는 단독 지정으로 전환.
 
 ### CLI 파라미터
 
 | 파라미터 | 기본값 | 설명 |
 |---|---|---|
-| `--model` | `openai` | 사용 모델 (openai / anthropic / gemini / all) |
+| `--model` | `openai` | 사용 모델 (openai / anthropic / gemini / **all**) |
 | `--top` | `30` | 분석 대상 상위 코인 수 (거래대금 기준) |
 | `--candles` | `200` | 지표 계산용 과거 4h 봉 수 |
-| `--future-candles` | `20` | 시뮬레이션용 미래 4h 봉 수 |
+| `--future-candles` | `30` | 시뮬레이션용 미래 4h 봉 수 (120시간 = 5일) |
 | `--step` | `6` | AI 분석 사이클 간격 (4h 봉 수, 기본 6 = 24시간) |
 | `--budget` | `1_000_000` | 가상 시드 (KRW) |
 
