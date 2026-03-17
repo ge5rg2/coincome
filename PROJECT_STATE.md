@@ -262,31 +262,35 @@ coincome/
 
 `scripts/backtester.py` — OpenAI / Anthropic / Gemini 3종 LLM 성능 비교
 
-### 사용법
+> ⚠️ **현재 검증 가능 모델: Gemini 전용**
+> OpenAI(`gpt-5.4`)와 Anthropic(`claude-sonnet-4-6`)은 현재 API 키 미확보 상태로
+> 실행·검증 불가. 테스트는 반드시 `--model gemini` 옵션으로 진행할 것.
+
+### 모델 구성 및 검증 상태
+
+| 어댑터 | 모델 ID | JSON 강제 방식 | 검증 상태 |
+|---|---|---|---|
+| `OpenAIAdapter` | `gpt-5.4` | `response_format={"type": "json_object"}` | ❌ API 키 미확보 |
+| `AnthropicAdapter` | `claude-sonnet-4-6` | 프롬프트 JSON 지시 + fallback 파서 | ❌ API 키 미확보 |
+| `GeminiAdapter` | `gemini-3.1-pro-preview` | `GenerateContentConfig(response_mime_type="application/json")` | ✅ 검증 가능 |
+
+### 테스트 절차 (Gemini 전용)
 
 ```bash
-# 환경변수 설정
-export OPENAI_API_KEY=...
-export ANTHROPIC_API_KEY=...    # Anthropic 어댑터 사용 시
-export GEMINI_API_KEY=...       # Gemini 어댑터 사용 시
+# 1. 환경변수 설정
+export GEMINI_API_KEY=...   # .env 파일에 있으면 자동 로드됨
 
-# 단일 모델
-python scripts/backtester.py --model openai --candles 200 --step 6
+# 2. 기본 테스트 (단기 검증용 — 빠른 실행)
+python scripts/backtester.py --model gemini --candles 100 --step 12 --top 20
 
-# 3개 모델 순차 비교
-python scripts/backtester.py --model all --candles 200
+# 3. 정식 백테스트 (전략 성능 측정용)
+python scripts/backtester.py --model gemini --candles 200 --step 6 --top 30
 
-# 가상 시드 조정
-python scripts/backtester.py --model openai --budget 500000
+# 4. 가상 시드 조정 테스트
+python scripts/backtester.py --model gemini --candles 200 --budget 500000
 ```
 
-### 모델 구성
-
-| 어댑터 | 모델 ID | JSON 강제 방식 |
-|---|---|---|
-| `OpenAIAdapter` | `gpt-5.4` | `response_format={"type": "json_object"}` |
-| `AnthropicAdapter` | `claude-sonnet-4-6` | 프롬프트 JSON 지시 + fallback 파서 |
-| `GeminiAdapter` | `gemini-3.1-pro-preview` | `GenerateContentConfig(response_mime_type="application/json")` |
+> OpenAI / Anthropic API 키 확보 후에는 `--model all` 또는 단독 지정으로 전환.
 
 ### CLI 파라미터
 
