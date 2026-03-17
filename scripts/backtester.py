@@ -829,13 +829,49 @@ async def run_backtest(args: argparse.Namespace) -> None:
                             i, len(top_symbols), sym, len(ohlcv),
                         )
 
-                # ── 캐시 미스 또는 force-fetch → API 호출 후 캐시 저장 ────────
+                # ── 캐시 미스 또는 force-fetch → 페이지네이션 API 수집 후 캐시 저장 ─
                 if ohlcv is None:
-                    ohlcv = await exchange.fetch_ohlcv(sym, timeframe="4h", limit=total_fetch)
+                    # 업비트 1회 최대 200봉 제한 → 여러 번 나눠 수집 후 병합
+                    _UPBIT_MAX = 200
+                    collected: dict[int, list] = {}   # {timestamp_ms: candle} 중복 방지
+                    _params: dict[str, str]    = {}   # 첫 호출: 'to' 없이 최신 데이터부터
+
+                    while len(collected) < total_fetch:
+                        chunk = await exchange.fetch_ohlcv(
+                            sym, timeframe="4h", limit=_UPBIT_MAX, params=_params
+                        )
+                        if not chunk:
+                            break  # 데이터 소진
+
+                        new_count = 0
+                        for candle in chunk:
+                            if candle[0] not in collected:
+                                collected[candle[0]] = candle
+                                new_count += 1
+
+                        if new_count == 0:
+                            break  # 완전 중복 — 더 이상 새로운 데이터 없음
+
+                        if len(chunk) < _UPBIT_MAX:
+                            break  # 과거 데이터 소진 (거래소 보유 한계)
+
+                        # 다음 페이지: 현재 가장 오래된 봉 바로 이전 시점 지정
+                        # (업비트 'to' 파라미터: ISO 8601 UTC 포맷, 해당 시각 이전 봉 반환)
+                        oldest_ts_ms = min(collected.keys()) - 1
+                        oldest_dt    = datetime.fromtimestamp(
+                            oldest_ts_ms / 1000, tz=timezone.utc
+                        )
+                        _params = {"to": oldest_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")}
+
+                        await asyncio.sleep(0.1)  # Rate Limit 방어
+
+                    # 타임스탬프 오름차순 정렬(과거→현재) → 최신 total_fetch봉만 유지
+                    ohlcv = sorted(collected.values(), key=lambda c: c[0])[-total_fetch:]
                     _save_cache(sym, "4h", ohlcv)
                     logger.debug(
-                        "[API]   %2d/%d  %-12s: %d봉 (신규 수집 → 캐시 저장)",
+                        "[API]   %2d/%d  %-12s: %d봉 수집 완료 (%d회 호출) → 캐시 저장",
                         i, len(top_symbols), sym, len(ohlcv),
+                        -(-len(collected) // _UPBIT_MAX),  # ceil division
                     )
 
                 if len(ohlcv) >= WARMUP_CANDLES + args.future_candles:
