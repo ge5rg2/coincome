@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
+from dotenv import load_dotenv
+
 
 import ccxt
 import pandas as pd
@@ -56,6 +58,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("backtester")
+load_dotenv()
 
 
 # ──────────────────────────────────────────────────────────────────────────
