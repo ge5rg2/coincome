@@ -90,6 +90,12 @@ BREAKEVEN_EXIT_PCT: float = 0.5
 # 시간 청산 봉 수: 이 봉(4h × 18 = 72h) 경과 후 방향성 미결정 포지션을 강제 TIMEOUT
 TIME_EXIT_CANDLES: int = 18
 
+# ── 모드별 고정 투입 비중 ──────────────────────────────────────────────────────
+# AI 호출은 스텝당 1회만 실행 (비용 절감).
+# 동일 픽·동일 시뮬레이션 결과를 두 지갑에서 각각 계산.
+SNIPER_WEIGHT_PCT: float = 20.0   # 🛡️ 인텔리전트 스나이퍼 — 안전 모드 (잔고의 20%)
+BEAST_WEIGHT_PCT:  float = 70.0   # 🔥 야수의 심장       — 공격 모드 (잔고의 70%)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 비용 계산 헬퍼
@@ -510,13 +516,11 @@ def parse_picks(raw: str) -> list[dict]:
                 symbol, stop_loss_pct,
             )
             continue
-        # 포지션 사이징 하드 룰: weight_pct = 20.0 고정 (AI 응답값 무시)
-        # → 리스크 관리·현금 확보를 위해 시장 상황·점수와 무관하게 항상 20%
-        weight_pct = 20.0
+        # weight_pct: SNIPER/BEAST 두 모드를 동시에 시뮬레이션하므로 픽 자체에는 저장하지 않음.
+        # 메인 루프에서 SNIPER_WEIGHT_PCT / BEAST_WEIGHT_PCT 상수로 직접 계산.
         validated.append({
             "symbol":            symbol,
             "score":             score,
-            "weight_pct":        weight_pct,
             "reason":            str(p.get("reason", "")),
             "target_profit_pct": abs(float(p.get("target_profit_pct", 5.0) or 5.0)),
             "stop_loss_pct":     stop_loss_pct,
@@ -648,8 +652,12 @@ def _print_model_summary(
     output_tokens: int,
     cost: float,
     initial_balance: float = 1_000_000,
-    final_balance: float | None = None,
+    final_sniper: float | None = None,
+    final_beast:  float | None = None,
+    mdd_sniper: float = 0.0,
+    mdd_beast:  float = 0.0,
 ) -> None:
+    """모델별 백테스트 요약을 SNIPER/BEAST 두 모드 나란히 출력한다."""
     wins       = sum(1 for r in rows if r["Sim_Result"] == "WIN")
     losses     = sum(1 for r in rows if r["Sim_Result"] == "LOSS")
     breakevens = sum(1 for r in rows if r["Sim_Result"] == "BREAKEVEN")
@@ -657,17 +665,29 @@ def _print_model_summary(
     total    = len(rows)
     win_rate = wins / total * 100 if total else 0.0
     avg_pnl  = sum(r["Sim_PnL_Pct"] for r in rows) / total if total else 0.0
-    print(f"\n  ┌ 모델: {model_id}")
-    print(f"  │ 픽 수: {total}  승={wins} 패={losses} 본절={breakevens} 타임아웃={timeouts}  "
-          f"승률={win_rate:.1f}%  평균PnL={avg_pnl:+.2f}%")
-    if final_balance is not None:
-        pnl_total = final_balance - initial_balance
-        pnl_sign  = "+" if pnl_total >= 0 else ""
-        roi       = pnl_total / initial_balance * 100 if initial_balance else 0.0
-        print(f"  │ 잔고: {initial_balance:,.0f} → {final_balance:,.0f} KRW  "
-              f"(총 손익금: {pnl_sign}{pnl_total:,.0f} KRW / ROI: {pnl_sign}{roi:.2f}%)")
-    print(f"  │ 토큰: 입력={input_tokens:,}  출력={output_tokens:,}  비용=${cost:.6f}")
-    print(f"  └{'─' * 53}")
+
+    bar = "─" * 60
+    print(f"\n  ┌{bar}")
+    print(f"  │ 모델: {model_id}")
+    print(f"  │ 픽 수: {total}  승={wins} 패={losses} 본절={breakevens} 타임아웃={timeouts}"
+          f"  │  승률={win_rate:.1f}%  평균PnL={avg_pnl:+.2f}%")
+    print(f"  ├{'─' * 60}")
+    # ── 🛡️ SNIPER ──────────────────────────────────────────────────────────
+    if final_sniper is not None:
+        s_pnl  = final_sniper - initial_balance
+        s_sign = "+" if s_pnl >= 0 else ""
+        s_roi  = s_pnl / initial_balance * 100 if initial_balance else 0.0
+        print(f"  │  🛡️ SNIPER (20%)  {initial_balance:>12,.0f} → {final_sniper:>12,.0f} KRW"
+              f"  ({s_sign}{s_pnl:,.0f} KRW / ROI {s_sign}{s_roi:.2f}%  MDD -{mdd_sniper:.1f}%)")
+    # ── 🔥 BEAST ───────────────────────────────────────────────────────────
+    if final_beast is not None:
+        b_pnl  = final_beast - initial_balance
+        b_sign = "+" if b_pnl >= 0 else ""
+        b_roi  = b_pnl / initial_balance * 100 if initial_balance else 0.0
+        print(f"  │  🔥 BEAST  (70%)  {initial_balance:>12,.0f} → {final_beast:>12,.0f} KRW"
+              f"  ({b_sign}{b_pnl:,.0f} KRW / ROI {b_sign}{b_roi:.2f}%  MDD -{mdd_beast:.1f}%)")
+    print(f"  │  토큰: 입력={input_tokens:,}  출력={output_tokens:,}  비용=${cost:.6f}")
+    print(f"  └{bar}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -773,9 +793,22 @@ async def run_backtest(args: argparse.Namespace) -> None:
             args.future_candles,
         )
 
-        # 모델별 누적 통계 초기화 (balance: 가상 시드 1M KRW 누적 잔고)
+        # 모델별 누적 통계 초기화 (SNIPER/BEAST 이중 지갑 + MDD 추적)
         per_model: dict[str, dict] = {
-            p: {"rows": [], "in_tok": 0, "out_tok": 0, "cost": 0.0, "balance": args.budget}
+            p: {
+                "rows":    [],
+                "in_tok":  0,
+                "out_tok": 0,
+                "cost":    0.0,
+                # 🛡️ 스나이퍼 지갑 (20% 비중)
+                "balance_sniper": args.budget,
+                "max_sniper":     args.budget,   # MDD 계산용 최고 잔고
+                "mdd_sniper":     0.0,            # 누적 최대 낙폭 (%)
+                # 🔥 야수 지갑 (70% 비중)
+                "balance_beast":  args.budget,
+                "max_beast":      args.budget,   # MDD 계산용 최고 잔고
+                "mdd_beast":      0.0,            # 누적 최대 낙폭 (%)
+            }
             for p in platforms if p in api_keys
         }
         all_csv_rows: list[dict] = []
@@ -867,13 +900,14 @@ async def run_backtest(args: argparse.Namespace) -> None:
                             model_id, len(future_ohlcv), MIN_FUTURE_CANDLES, symbol,
                         )
 
+                    # ── 시뮬레이션은 1번만 실행 (두 모드 공통 결과) ───────────
                     sim = simulate_trade_from_data(
                         future_ohlcv, entry_price,
                         target_pct=pick["target_profit_pct"],
                         stop_pct=pick["stop_loss_pct"],
                     )
 
-                    # SKIP: 데이터 부족·비정상 봉 → 잔고 변동 없이 CSV에서 제외
+                    # SKIP: 데이터 부족·비정상 봉 → 두 지갑 모두 변동 없이 CSV 제외
                     if sim["result"] == "SKIP":
                         logger.warning(
                             "[%s] 시뮬레이션 스킵: %s — 유효 미래 봉 없음 (신규 상장 또는 거래 정지 의심)",
@@ -881,20 +915,45 @@ async def run_backtest(args: argparse.Namespace) -> None:
                         )
                         continue
 
-                    # ── 가상 시드 잔고 업데이트 ─────────────────────────────
-                    current_balance = per_model[platform]["balance"]
-                    invested_krw    = current_balance * pick["weight_pct"] / 100
-                    pnl_krw         = invested_krw * sim["pnl_pct"] / 100
-                    per_model[platform]["balance"] += pnl_krw
-                    new_balance = per_model[platform]["balance"]
+                    # ── 🛡️ SNIPER 지갑 업데이트 (잔고의 20% 투입) ───────────
+                    bal_s           = per_model[platform]["balance_sniper"]
+                    sniper_invested = bal_s * SNIPER_WEIGHT_PCT / 100
+                    sniper_pnl_krw  = sniper_invested * sim["pnl_pct"] / 100
+                    per_model[platform]["balance_sniper"] += sniper_pnl_krw
+                    new_bal_s = per_model[platform]["balance_sniper"]
+                    # MDD 갱신
+                    if new_bal_s > per_model[platform]["max_sniper"]:
+                        per_model[platform]["max_sniper"] = new_bal_s
+                    cur_mdd_s = (
+                        (per_model[platform]["max_sniper"] - new_bal_s)
+                        / per_model[platform]["max_sniper"] * 100
+                    )
+                    if cur_mdd_s > per_model[platform]["mdd_sniper"]:
+                        per_model[platform]["mdd_sniper"] = cur_mdd_s
+
+                    # ── 🔥 BEAST 지갑 업데이트 (잔고의 70% 투입) ────────────
+                    bal_b          = per_model[platform]["balance_beast"]
+                    beast_invested = bal_b * BEAST_WEIGHT_PCT / 100
+                    beast_pnl_krw  = beast_invested * sim["pnl_pct"] / 100
+                    per_model[platform]["balance_beast"] += beast_pnl_krw
+                    new_bal_b = per_model[platform]["balance_beast"]
+                    # MDD 갱신
+                    if new_bal_b > per_model[platform]["max_beast"]:
+                        per_model[platform]["max_beast"] = new_bal_b
+                    cur_mdd_b = (
+                        (per_model[platform]["max_beast"] - new_bal_b)
+                        / per_model[platform]["max_beast"] * 100
+                    )
+                    if cur_mdd_b > per_model[platform]["mdd_beast"]:
+                        per_model[platform]["mdd_beast"] = cur_mdd_b
 
                     logger.info(
-                        "[결과] %s 시뮬레이션 완료 -> %s (%.2f%%) / 보유시간: %d봉"
-                        " | 투자: %s KRW / 손익: %s KRW / 잔고: %s KRW",
+                        "[결과] %s → %s (%.2f%%) / %d봉"
+                        " | 🛡️SNIPER: 투자 %s → 손익 %s → 잔고 %s"
+                        " | 🔥BEAST: 투자 %s → 손익 %s → 잔고 %s",
                         symbol, sim["result"], sim["pnl_pct"], sim["candles_held"],
-                        f"{invested_krw:,.0f}",
-                        f"{pnl_krw:+,.0f}",
-                        f"{new_balance:,.0f}",
+                        f"{sniper_invested:,.0f}", f"{sniper_pnl_krw:+,.0f}", f"{new_bal_s:,.0f}",
+                        f"{beast_invested:,.0f}",  f"{beast_pnl_krw:+,.0f}",  f"{new_bal_b:,.0f}",
                     )
 
                     row = {
@@ -902,7 +961,6 @@ async def run_backtest(args: argparse.Namespace) -> None:
                         "Model":              model_id,
                         "Symbol":             symbol,
                         "Score":              pick["score"],
-                        "Weight_Pct":         pick["weight_pct"],
                         "Entry_Price":        entry_price,
                         "Target_Profit_Pct":  pick["target_profit_pct"],
                         "Stop_Loss_Pct":      pick["stop_loss_pct"],
@@ -910,9 +968,17 @@ async def run_backtest(args: argparse.Namespace) -> None:
                         "Sim_Result":         sim["result"],
                         "Sim_PnL_Pct":        round(sim["pnl_pct"], 4),
                         "Candles_Held":       sim["candles_held"],
-                        "Invested_KRW":       round(invested_krw),
-                        "PnL_KRW":            round(pnl_krw),
-                        "Balance_KRW":        round(new_balance),
+                        # 🛡️ SNIPER 컬럼
+                        "Sniper_Weight_Pct":  SNIPER_WEIGHT_PCT,
+                        "Sniper_Invested_KRW": round(sniper_invested),
+                        "Sniper_PnL_KRW":     round(sniper_pnl_krw),
+                        "Sniper_Balance_KRW": round(new_bal_s),
+                        # 🔥 BEAST 컬럼
+                        "Beast_Weight_Pct":   BEAST_WEIGHT_PCT,
+                        "Beast_Invested_KRW": round(beast_invested),
+                        "Beast_PnL_KRW":      round(beast_pnl_krw),
+                        "Beast_Balance_KRW":  round(new_bal_b),
+                        # 공통
                         "Input_Tokens":       in_tok,
                         "Output_Tokens":      out_tok,
                         "Estimated_Cost_USD": round(per_pick_cost, 6),
@@ -954,7 +1020,7 @@ async def run_backtest(args: argparse.Namespace) -> None:
         print(f"  실행 모델     : {', '.join(p for p in platforms if p in api_keys)}")
         print(f"{sep}")
 
-        # 모델별 상세 (2개 이상일 때만)
+        # ── 모델별 상세 (2개 이상일 때만) ───────────────────────────────
         if len(per_model) > 1:
             print("  [ 모델별 결과 ]")
             for platform, stats in per_model.items():
@@ -962,11 +1028,14 @@ async def run_backtest(args: argparse.Namespace) -> None:
                 _print_model_summary(
                     model_id, stats["rows"], stats["in_tok"], stats["out_tok"], stats["cost"],
                     initial_balance=args.budget,
-                    final_balance=stats["balance"],
+                    final_sniper=stats["balance_sniper"],
+                    final_beast=stats["balance_beast"],
+                    mdd_sniper=stats["mdd_sniper"],
+                    mdd_beast=stats["mdd_beast"],
                 )
             print(f"{sep}")
 
-        # 전체 합산
+        # ── 전체 합산 통계 ────────────────────────────────────────────
         total      = len(all_csv_rows)
         wins       = sum(1 for r in all_csv_rows if r["Sim_Result"] == "WIN")
         losses     = sum(1 for r in all_csv_rows if r["Sim_Result"] == "LOSS")
@@ -988,20 +1057,32 @@ async def run_backtest(args: argparse.Namespace) -> None:
         print(f"  {'승률         :':<20} {win_rate:.1f}%")
         print(f"  {'평균 수익률  :':<20} {avg_pnl:+.2f}%")
         print(f"{sep}")
-        print("  [ 가상 시드 잔고 추적 (모델별) ]")
+
+        # ── 🛡️ SNIPER vs 🔥 BEAST 잔고 비교표 ──────────────────────────
+        print("  [ 🛡️ SNIPER vs 🔥 BEAST 가상 시드 비교 ]")
         print(f"  {'초기 시드    :':<20} {args.budget:,.0f} KRW")
         for platform, stats in per_model.items():
-            model_id    = ADAPTER_MAP[platform](api_keys[platform]).model
-            final_bal   = stats["balance"]
-            pnl_total   = final_bal - args.budget
-            pnl_sign    = "+" if pnl_total >= 0 else ""
-            roi         = pnl_total / args.budget * 100 if args.budget else 0.0
+            model_id  = ADAPTER_MAP[platform](api_keys[platform]).model
+            s_bal     = stats["balance_sniper"]
+            b_bal     = stats["balance_beast"]
+            s_pnl     = s_bal - args.budget
+            b_pnl     = b_bal - args.budget
+            s_sign    = "+" if s_pnl >= 0 else ""
+            b_sign    = "+" if b_pnl >= 0 else ""
+            s_roi     = s_pnl / args.budget * 100 if args.budget else 0.0
+            b_roi     = b_pnl / args.budget * 100 if args.budget else 0.0
+            print(f"\n  [{model_id}]")
             print(
-                f"  {model_id:<22}  "
-                f"{args.budget:>12,.0f} → {final_bal:>12,.0f} KRW  "
-                f"({pnl_sign}{pnl_total:,.0f} KRW / ROI {pnl_sign}{roi:.2f}%)"
+                f"  🛡️ SNIPER (20%)  {args.budget:>12,.0f} → {s_bal:>12,.0f} KRW"
+                f"  ({s_sign}{s_pnl:,.0f} KRW / ROI {s_sign}{s_roi:.2f}%"
+                f"  MDD -{stats['mdd_sniper']:.1f}%)"
             )
-        print(f"{sep}")
+            print(
+                f"  🔥 BEAST  (70%)  {args.budget:>12,.0f} → {b_bal:>12,.0f} KRW"
+                f"  ({b_sign}{b_pnl:,.0f} KRW / ROI {b_sign}{b_roi:.2f}%"
+                f"  MDD -{stats['mdd_beast']:.1f}%)"
+            )
+        print(f"\n{sep}")
         print("  [ AI 토큰 사용량 ]")
         print(f"  {'총 입력 토큰 :':<20} {total_in:,}")
         print(f"  {'총 출력 토큰 :':<20} {total_out:,}")
