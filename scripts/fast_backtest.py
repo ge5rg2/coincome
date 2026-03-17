@@ -4,12 +4,21 @@ fast_backtest.py — 로컬 OHLCV 캐시 기반 초고속 전략 백테스트.
 LLM · 업비트 API 호출 없이 .cache/ohlcv/ JSON 파일만 읽어
 순수 수학 연산으로 모멘텀 돌파(Momentum Breakout) 전략을 검증한다.
 
-[전략 — 추세 돌파 스나이퍼 v5 대응]
-  진입: Close > MA20  AND  RSI 50~65 (상승 모멘텀 초입)
-  익절: 진입가 대비 +TAKE_PROFIT_PCT% 도달
-  손절: 진입가 대비 -STOP_LOSS_PCT%  도달
+[전략 — 추세 돌파 스나이퍼 v6: MA50 장기 추세 필터 도입]
+  진입: Close > MA20  AND  Close > MA50  AND  RSI 55~70
+        ─ MA20: 단기 상승 돌파 확인
+        ─ MA50: 중장기 상승 추세 내 위치 확인 (가짜 돌파/휩쏘 방어)
+        ─ RSI 55~70: 강한 상승 모멘텀 초입 (과매수 진입 금지)
+  익절: 진입가 대비 +TAKE_PROFIT_PCT% 도달 (기본 +6.0%, R:R 1.5:1)
+  손절: 진입가 대비 -STOP_LOSS_PCT%  도달 (기본 -4.0%)
   우선순위: WIN > LOSS (동일 봉에서 TP·SL 동시 충족 시 WIN 적용)
   겹침 방지: 현재 포지션 청산 전까지 신규 진입 신호 무시 (per-symbol)
+
+[v1 → v6 변경 이력]
+  v1 실패 원인: MA20 단독 필터로 메이저 코인 가짜 돌파(휩쏘)에 취약,
+                승률 33% / BEAST MDD -94.9%
+  v6 개선:      MA50 장기 추세 필터 추가, RSI 50~65 → 55~70 상향,
+                TP 8% → 6% (승률 우선, R:R 1.5:1)
 
 [의존성]
   표준 라이브러리만 사용 (pandas / requests 불필요)
@@ -17,7 +26,7 @@ LLM · 업비트 API 호출 없이 .cache/ohlcv/ JSON 파일만 읽어
 실행 예시:
   python scripts/fast_backtest.py
   python scripts/fast_backtest.py --symbol BTC_KRW
-  python scripts/fast_backtest.py --tp 8.0 --sl 5.0
+  python scripts/fast_backtest.py --tp 6.0 --sl 4.0
   python scripts/fast_backtest.py --timeframe 4h --csv
   python scripts/fast_backtest.py --symbol BTC_KRW --tp 6 --sl 4 --csv
 """
@@ -35,13 +44,15 @@ from typing import Any
 # ──────────────────────────────────────────────────────────────────────────────
 # ★ 전략 파라미터 — 여기를 수정해 전략을 튜닝하세요
 # ──────────────────────────────────────────────────────────────────────────────
-TAKE_PROFIT_PCT: float = 6.0   # 익절률 (%) — 진입가 대비 이 % 도달 시 전량 익절
+TAKE_PROFIT_PCT: float = 6.0   # 익절률 (%) — 진입가 대비 이 % 도달 시 전량 익절 (R:R 1.5:1)
 STOP_LOSS_PCT:   float = 4.0   # 손절률 (%) — 진입가 대비 이 % 하락 시 전량 손절
 
-RSI_ENTRY_MIN:   float = 50.0  # 진입 허용 RSI 최솟값 (모멘텀 시작 구간)
-RSI_ENTRY_MAX:   float = 65.0  # 진입 허용 RSI 최댓값 (과매수 진입 금지)
+# v6: RSI 진입 구간을 50~65 → 55~70으로 상향 (확인된 모멘텀, 중립 구간 제외)
+RSI_ENTRY_MIN:   float = 55.0  # 진입 허용 RSI 최솟값 (강한 상승 모멘텀 초입)
+RSI_ENTRY_MAX:   float = 70.0  # 진입 허용 RSI 최댓값 (과매수 진입 금지)
 
-MA_PERIOD:       int   = 20    # 이동평균선 기간 (봉)
+MA_PERIOD:       int   = 20    # 단기 이동평균선 기간 (봉) — Close>MA20 돌파 확인
+MA50_PERIOD:     int   = 50    # 중장기 이동평균선 기간 (봉) — v6 신규: 휩쏘 방어 장기 추세 필터
 RSI_PERIOD:      int   = 14    # RSI 계산 기간  (봉)
 
 # 모드별 투입 비중
@@ -198,8 +209,9 @@ def load_ohlcv_files(
         logger.error("캐시 파일 없음 (패턴: *_%s.json)", timeframe)
         sys.exit(1)
 
-    # 최소 데이터 요건: MA + RSI 워밍업 + 여유
-    min_candles = MA_PERIOD + RSI_PERIOD + 5
+    # 최소 데이터 요건: MA50(가장 긴 워밍업) + RSI + 여유
+    # MA50 워밍업 49봉 + RSI 워밍업 14봉 + 여유 5봉
+    min_candles = max(MA_PERIOD, MA50_PERIOD) + RSI_PERIOD + 5
 
     result: dict[str, list[list]] = {}
     for path in files:
@@ -267,8 +279,9 @@ def backtest_symbol(
     lows   = [float(c[3]) for c in ohlcv]
     ts_arr = [int(c[0])   for c in ohlcv]
 
-    ma_vals  = calc_ma(closes,  MA_PERIOD)
-    rsi_vals = calc_rsi(closes, RSI_PERIOD)
+    ma_vals   = calc_ma(closes,  MA_PERIOD)
+    ma50_vals = calc_ma(closes,  MA50_PERIOD)   # v6: 중장기 추세 필터용 MA50
+    rsi_vals  = calc_rsi(closes, RSI_PERIOD)
 
     trades: list[dict[str, Any]] = []
     in_position  = False
@@ -317,22 +330,28 @@ def backtest_symbol(
             continue
 
         # ── [미보유] 진입 조건 확인 ──────────────────────────────────────────
-        ma_curr  = ma_vals[i]
-        rsi_curr = rsi_vals[i]
+        ma_curr   = ma_vals[i]
+        ma50_curr = ma50_vals[i]   # v6: 중장기 추세 필터
+        rsi_curr  = rsi_vals[i]
 
         # 지표 미준비 구간 (워밍업) → 스킵
-        if ma_curr is None or rsi_curr is None:
+        # MA50 워밍업(49봉)이 가장 길어 이 구간이 사실상 지배
+        if ma_curr is None or ma50_curr is None or rsi_curr is None:
             continue
 
         close_curr = closes[i]
 
-        # 조건 A: 현재 종가 > MA20  (MA20 위에 위치 — 상향 돌파 또는 지지)
+        # 조건 A: 현재 종가 > MA20  (단기 상승 돌파 확인)
         above_ma = close_curr > ma_curr
 
-        # 조건 B: RSI 진입 범위  (상승 모멘텀 초입 — 과매수 진입 금지)
+        # 조건 B: 현재 종가 > MA50  (중장기 상승 추세 내 위치 — v6 신규)
+        # 목적: MA20 위에서도 중장기 하락 추세일 때 발생하는 가짜 돌파(휩쏘) 원천 차단
+        above_ma50 = close_curr > ma50_curr
+
+        # 조건 C: RSI 진입 범위  (강한 상승 모멘텀 초입 — 과매수 진입 금지)
         rsi_ok = rsi_min <= rsi_curr <= rsi_max
 
-        if above_ma and rsi_ok:
+        if above_ma and above_ma50 and rsi_ok:
             # 진입: 해당 봉 종가에 매수 체결
             in_position  = True
             entry_price  = close_curr
@@ -476,10 +495,10 @@ def print_summary(
     sep2 = "═" * 64
 
     print(f"\n{_C}{_B}{'=' * 64}{_RS}")
-    print(f"{_C}{_B}  ⚡ FAST BACKTEST  —  Momentum Breakout v5{_RS}")
+    print(f"{_C}{_B}  ⚡ FAST BACKTEST  —  Momentum Breakout v6 (MA50 추세 필터){_RS}")
     print(f"{_C}{sep2}{_RS}")
     print(f"  타임프레임  : {timeframe}봉")
-    print(f"  진입 파라미터: MA{MA_PERIOD}  |  RSI {rsi_min:.0f}~{rsi_max:.0f}")
+    print(f"  진입 파라미터: MA{MA_PERIOD} & MA{MA50_PERIOD} (추세 필터)  |  RSI {rsi_min:.0f}~{rsi_max:.0f}")
     print(f"  손익비 설정 : TP +{tp_pct:.1f}%  |  SL -{sl_pct:.1f}%"
           f"  (R:R = {tp_pct / sl_pct:.2f}:1)")
     print(f"  초기 시드   : {INITIAL_BALANCE:,.0f} KRW")
@@ -488,9 +507,9 @@ def print_summary(
     # ── 거래 없음 경고 ─────────────────────────────────────────────────────
     if total == 0:
         print(f"\n{_Y}  [경고] 체결된 거래 없음.{_RS}")
-        print(f"  진입 조건(RSI {rsi_min:.0f}~{rsi_max:.0f}, Close>MA{MA_PERIOD})을")
+        print(f"  진입 조건(RSI {rsi_min:.0f}~{rsi_max:.0f}, Close>MA{MA_PERIOD}, Close>MA{MA50_PERIOD})을")
         print(f"  만족하는 구간이 현재 캐시 데이터에 없습니다.")
-        print(f"  --rsi-min 또는 --rsi-max 를 조정해보세요.\n")
+        print(f"  --rsi-min / --rsi-max 를 조정하거나 캐시 봉 수를 늘려보세요.\n")
         return
 
     # ── 집계 ──────────────────────────────────────────────────────────────
@@ -646,8 +665,8 @@ def main() -> None:
 
     # ── [2단계] 심볼별 백테스트 실행 ─────────────────────────────────────
     logger.info(
-        "[전략] TP +%.1f%%  SL -%.1f%%  RSI %.0f~%.0f  MA%d",
-        tp_pct, sl_pct, rsi_min, rsi_max, MA_PERIOD,
+        "[전략 v6] TP +%.1f%%  SL -%.1f%%  RSI %.0f~%.0f  MA%d & MA%d (추세 필터)",
+        tp_pct, sl_pct, rsi_min, rsi_max, MA_PERIOD, MA50_PERIOD,
     )
     all_trades: list[dict] = []
     for sym, ohlcv in sorted(ohlcv_map.items()):
