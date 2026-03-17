@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-17 (최종 수정: 2026-03-17 — 스마트 청산 로직 v4 적용)
+> **기준일**: 2026-03-17 (최종 수정: 2026-03-17 — 반익반손 + 고정 비중 v5 적용)
 > **현재 작업 브랜치**: `backtest`
 > **최신 안정 브랜치**: `dev` (커밋 `4abaaf5`)
 
@@ -252,7 +252,7 @@ coincome/
 | 우선순위 | 항목 | 관련 브랜치 |
 |---|---|---|
 | 🔴 높음 | **PR #35 리뷰·병합** — 백테스터를 `dev`에 통합 | `backtest` → `dev` |
-| 🟡 보통 | 스마트 청산 v4 적용 후 Claude API 단독 재백테스트 (`--model anthropic`) | `backtest` |
+| 🟡 보통 | 반익반손 v5 적용 후 Claude API 단독 재백테스트 (`--model anthropic`) | `backtest` |
 | 🟡 보통 | AI 매매 성과 리포트 (실전 이력 집계 → Discord DM) | 신규 브랜치 필요 |
 | 🟢 낮음 | `feat`, `feat-new` 브랜치 정리(삭제) | — |
 
@@ -365,4 +365,29 @@ python scripts/backtester.py --model all --candles 200 --budget 500000
 [2] BREAKEVEN — breakeven 활성화 후 +0.5% 이하 하락 (LOSS 대체)
 [3] LOSS      — 원래 손절선 도달 (breakeven 미활성 구간에서만)
 [4] TIMEOUT   — 12봉 경과 (방향성 미결정 조기 청산)
+```
+
+### ✅ 수익 극대화 고도화 v5 (2026-03-17)
+
+**배경**: v4 적용 후 평균 PnL 양수 전환 성공. 잃지 않는 구조를 넘어 수익금 극대화를 위해
+반익반손 전략 및 포트폴리오 고정 비중 룰 도입.
+
+| 항목 | 변경 전 | 변경 후 |
+|---|---|---|
+| 익절 방식 | 목표가 도달 시 100% 전량 즉시 익절 (WIN) | **목표가 도달 시 50% 부분 익절 → 나머지 50% 트레일링 스탑 관리** |
+| 나머지 50% 스탑 | N/A | **트레일링 스탑 = 진입가 +0.5% (본절가) 고정** |
+| 최종 PnL 계산 | `target_pct` 그대로 반환 | **(첫 50% target_pct + 나머지 50% 청산 PnL) / 2** |
+| 포지션 투입 비중 | 최대 30% 이하 (AI 재량) | **무조건 20.0% 고정 (하드 룰, AI 응답값 무시)** |
+| `parse_picks` weight | `min(raw_weight, 30.0)` | **`weight_pct = 20.0` 항상 고정** |
+| `_SYSTEM_PROMPT` 섹션 4 | "보수적 비중 최대 30% 이하" | **"고정 20% 비중 절대 하드 룰"** |
+
+**반익반손 청산 흐름** (`simulate_trade_from_data` v5):
+```
+[전량 포지션 구간]
+  high >= target_price → partial_tp_done = True, partial_tp_pnl = target_pct (50% 익절)
+    ↓ 남은 50% 트레일링 스탑 = entry_price × 1.005 로 상향
+[반익 완료 후 구간]
+  low  <= entry × 1.005 → result="WIN",  pnl = (target_pct + 0.5)   / 2
+  i == 11 (TIME EXIT)  → result="WIN",  pnl = (target_pct + close%) / 2
+  30봉 소진             → result="WIN",  pnl = (target_pct + last_close%) / 2
 ```
