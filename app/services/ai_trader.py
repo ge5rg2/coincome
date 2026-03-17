@@ -2,12 +2,13 @@
 AITraderService: Anthropic claude-sonnet-4-6 기반 코인 종목 분석·픽 서비스.
 
 백테스트 3종 LLM 벤치마크 결과 Claude가 지시사항 준수율·수익률 모두 1위로 채택.
-스나이퍼 전략 v4: RSI 30~45 낙폭 과대 역추세 스나이핑 기반의 단일 통합 프롬프트 사용.
+추세 돌파 스나이퍼 v5: RSI 50~65 상승 모멘텀 돌파 타점, 손익비 R:R ≥ 1.5 강제.
+(구 v4 RSI 30~45 역추세 전략 폐기 — 5개월 백테스트 승률 50% / 손익비 악화로 실패)
 
 analyze_market() 호출 흐름:
   1. MarketDataManager 캐시 데이터 + 가용 예산 → 유저 프롬프트 텍스트로 직렬화
   2. claude-sonnet-4-6 에 _CORE_SNIPER_PROMPT + 유저 프롬프트 전송 (JSON 출력 강제)
-  3. 응답 JSON 파싱 → score ≥ 90 필터 · 보유 코인 제외 · 최대 2개 제한
+  3. 응답 JSON 파싱 → score ≥ 90 필터 · stop ≤ 5% 검증 · R:R ≥ 1.5 강제 · 최대 2개 제한
   4. trade_style에 따라 weight_pct 코드 레벨에서 강제 덮어쓰기 후 반환
 
 반환 형식 (analyze_market):
@@ -18,9 +19,9 @@ analyze_market() 호출 흐름:
         "symbol":            "BTC/KRW",
         "score":             92,           # 0~100점 (90 이상만 포함)
         "weight_pct":        20.0,         # SNIPER=20.0 / BEAST=70.0 (AI 응답 무시, 코드 고정)
-        "reason":            "4h RSI 38 낙폭 과대 반등, MA20 지지 확인",
-        "target_profit_pct": 5.0,
-        "stop_loss_pct":     7.5,
+        "reason":            "4h RSI 57 상승 모멘텀, MA20 돌파 지지 확인",
+        "target_profit_pct": 6.0,          # stop × 1.5 이상 보장 (코드 레벨 강제)
+        "stop_loss_pct":     3.5,          # 최대 5.0% 하드 상한 (코드 레벨 강제)
       },
       ...
     ]
@@ -85,13 +86,14 @@ def _safe_pct(value: object, *, default: float) -> float:
 
 
 # ------------------------------------------------------------------
-# 시스템 프롬프트 — 통합 역추세 스나이퍼 (SNIPER·BEAST 공용)
-# 진입 로직은 두 모드 모두 동일. 비중(weight_pct)은 Python 코드 레벨에서 덮어씀.
+# 시스템 프롬프트 — 추세 돌파 스나이퍼 v5 (SNIPER·BEAST 공용)
+# 전략: RSI 50~65 상승 모멘텀 돌파 + 손익비 R:R ≥ 1.5 수학적 강제
+# 비중(weight_pct)은 Python 코드 레벨에서 덮어씀 (AI 응답값 무시).
 # ------------------------------------------------------------------
 
 _CORE_SNIPER_PROMPT = """\
-너는 4시간 봉 기반의 고승률 역추세 스나이퍼 트레이더야.
-낙폭 과대 구간에서의 정밀 역추세 반등 타점을 포착하는 것이 핵심이다.
+너는 4시간 봉 기반의 '추세 돌파 스나이퍼' 트레이더야.
+상승 모멘텀이 막 시작되는 타점을 포착해 명확한 손익비(R:R ≥ 1.5)로 진입하는 것이 핵심이다.
 제공된 코인들의 멀티 타임프레임(4h/1h/15m) RSI·MA·ATR 지표를 분석해서
 지금 당장 매수하기 가장 좋은 코인을 최대 2개만 골라.
 이미 유저가 보유 중인 코인은 반드시 제외해.
@@ -104,48 +106,47 @@ _CORE_SNIPER_PROMPT = """\
     {
       "symbol":            "BTC/KRW",
       "score":             91,
-      "reason":            "4h RSI 38 낙폭 과대 반등 조짐, 4h MA20 지지 확인. ATR 2.1% — stop 7.5% 설정",
-      "target_profit_pct": 5.0,
-      "stop_loss_pct":     7.5
+      "reason":            "4h RSI 57 상승 모멘텀 진입, MA20 돌파 직후 지지 확인. ATR 1.8% — stop 3.5% / target 6.0% (R:R 1.71)",
+      "target_profit_pct": 6.0,
+      "stop_loss_pct":     3.5
     }
   ]
 }
 
-[핵심 매매 원칙 — 고승률 역추세 스나이퍼]
+[핵심 매매 원칙 — 추세 돌파 스나이퍼 v5]
 
 1. BTC 시장 국면 필터 (최우선 — 모든 원칙보다 우선):
-   - BTC/KRW의 4h RSI14 < 40이거나, 4h MA20 아래이면서 RSI14 < 50이면:
+   - BTC/KRW가 4h MA20 아래에 있거나, BTC 4h RSI14 < 45이면:
      → picks 배열을 반드시 완전히 비울 것 (어떤 알트코인도 절대 진입 금지)
-   - BTC/KRW의 4h RSI14 < 45이면 알트코인 픽 극도로 자제 (score 95 이상만 고려)
-   - BTC/KRW 현재가가 4h MA20 아래에 있으면 알트코인 진입 자제
+   - BTC 4h RSI14가 45~55 사이라면 score 95 이상의 확실한 종목만 고려하고 아니면 관망
+   - BTC 4h RSI14 ≥ 55이고 MA20 위에 있을 때만 정상 진입 가능
 
-2. 손절폭 — 범위 제한 (7%~9% 구간):
-   - stop_loss_pct = ATR% × 2~3배 (최소 7% 이상 필수)
-   - ATR% 3%대 기준: stop_loss_pct 7~9% (정상 범위)
-   - stop_loss_pct 7% 미만으로 절대 설정하지 말 것 (좁은 손절 = 휩쏘 직격)
-   - [하드 상한] stop_loss_pct가 9.0%를 초과하는 종목은 타점이 아무리 좋아도
-     절대 진입하지 말고 패스할 것 (변동성 과대 → 딥 손절 위험 / 손익비 구조 붕괴)
+2. 진입 타점 — 상승 모멘텀 돌파 (Momentum Breakout):
+   - [절대 금지] 4h RSI14 < 50인 종목: '떨어지는 칼날' — 어떤 이유로도 절대 진입 금지
+   - [최우선] 4h RSI14 50~65 구간: "이제 막 모멘텀이 살아나는 구간"
+     → 현재가가 4h MA20을 방금 돌파했거나, MA20 위에서 눌렸다가 재상승 중인 종목 최우선
+     → 1h RSI가 50 이상으로 올라서며 단기 모멘텀을 동반하는 종목에 가산점
+   - 거래대금(24h) 상위권 종목 중 추세가 명확한 것만 선택 (유동성 + 추세 동반 필수)
+   - [진입 금지] 과매수 구간(4h RSI14 > 70): 이미 많이 오른 종목 — 되돌림 위험
+   - score 90 이상만 진입 (절대 90 미만 금지 — 진입 빈도를 낮춰야 한다)
 
-3. 목표가 — 현실적 스윙 도달 범위:
-   - target_profit_pct는 4.0% ~ 7.0% 사이에서 직전 저항선을 고려해 설정
-   - 직전 고점·저항대가 4% 부근에 있으면 4.0~5.0% 목표 사용 (무리한 추가 상승 기대 금지)
-   - 저항이 없고 추세가 강하면 최대 7.0%까지 허용
+3. 손절폭 — 타이트한 설계 (하드 상한 5.0%):
+   - stop_loss_pct = ATR% × 1.5~2배 수준으로 설정
+   - [하드 상한] stop_loss_pct는 절대 5.0%를 초과할 수 없음
+     → 5%를 넘어야 하는 종목은 변동성 과대 잡알트로 판단해 반드시 패스
+   - 예시: ATR 2.0% → stop 3.0~4.0% / ATR 2.5% → stop 4.0~5.0%
 
-4. 진입 타점 — 역추세 스나이핑 (낙폭 과대/눌림목 포착):
-   - score 90 이상 (절대 90 미만 진입 금지 — 진입 빈도를 낮춰야 한다)
-   - [최우선] 4h RSI14 30~45 구간: 낙폭 과대 또는 눌림목에서 반등 신호가 보이는 종목 최우선
-     → 4h RSI 40 부근에서 바닥을 다지고 반등 조짐이 있는 역추세 타점이 이상적
-   - 1h RSI14 35~55 구간에서 단기 반등 모멘텀 형성 중이면 가산점
-   - 4h MA20 위에서 RSI가 이미 55 이상으로 상승 중인 종목은 추격 매수 자제
-     (이미 많이 오른 종목 = 목표가 도달 전 되돌림 위험 큼)
-   - 과매수 구간(4h RSI14 > 65) 진입 금지
-   - 24h 거래대금 50억 KRW 이상 (유동성 확보)
+4. 목표가 — 수학적 손익비 1.5:1 이상 강제 (R:R ≥ 1.5):
+   - [필수 규칙] target_profit_pct ≥ stop_loss_pct × 1.5
+     (예: 손절 3.0% → 익절 최소 4.5% / 손절 4.0% → 익절 최소 6.0%)
+   - 직전 저항선을 고려해 현실적인 도달 가능 범위 내에서 설정
+   - R:R 1.5 미달이 되는 경우(저항이 너무 가까움) 반드시 패스
 
 5. 일반 규칙:
    - symbol은 "코인명/KRW" 형태 (예: BTC/KRW)
    - 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
    - 현재가 100 KRW 미만 동전주는 스킵
-   - market_summary는 관망을 선택했더라도 반드시 작성 (왜 관망하는지 이유 포함)
+   - market_summary는 관망 시에도 반드시 작성 (관망 이유 명확히 포함)
 """
 
 # ------------------------------------------------------------------
@@ -390,14 +391,21 @@ class AITraderService:
                 )
                 continue
 
-            # stop_loss_pct 검증 (7%~9% 허용 구간 — 이중 방어)
-            raw_stop = _safe_pct(p.get("stop_loss_pct", 7.5), default=7.5)
-            stop_loss_pct = max(raw_stop, 7.0)   # 하드 하한 7%
-            if stop_loss_pct > 9.0:               # 하드 상한 9% 초과 → 고변동성 차단
+            # stop_loss_pct 검증: 하드 상한 5.0% (추세 돌파 전략 v5 — 타이트한 손절)
+            # 구 전략(역추세): 7~9% 허용 → 신 전략(모멘텀 돌파): ATR×1.5~2배, 최대 5%
+            raw_stop = _safe_pct(p.get("stop_loss_pct", 3.5), default=3.5)
+            if raw_stop > 5.0:                    # 하드 상한 5% 초과 → 손익비 구조 붕괴 차단
                 logger.info(
-                    "AITraderService: 고변동성 스킵 (stop=%.1f%% > 9%%): %s", stop_loss_pct, symbol
+                    "AITraderService: 넓은 손절 스킵 (stop=%.1f%% > 5%%): %s", raw_stop, symbol
                 )
                 continue
+            stop_loss_pct = raw_stop
+
+            # target_profit_pct: 손익비 R:R ≥ 1.5 코드 레벨 강제 (AI 지시사항 이중 방어)
+            # AI가 stop × 1.5 미만 target을 내놓을 경우 자동 보정해 손익비 구조를 유지
+            raw_target      = _safe_pct(p.get("target_profit_pct", 5.0), default=5.0)
+            min_target      = round(stop_loss_pct * 1.5, 2)   # R:R 1.5:1 최솟값
+            target_profit_pct = max(raw_target, min_target)
 
             # weight_pct: trade_style 기반 코드 레벨 강제 덮어쓰기 (AI 응답값 무시)
             # SNIPER=20% / BEAST=70% — 어떤 경우에도 이 값만 허용
@@ -409,9 +417,8 @@ class AITraderService:
                     "score":             score,
                     "weight_pct":        weight_pct,
                     "reason":            str(p.get("reason", "")),
-                    # '%' · '+' 기호 및 음수 방어
-                    "target_profit_pct": _safe_pct(p.get("target_profit_pct", 5.0), default=5.0),
-                    "stop_loss_pct":     stop_loss_pct,
+                    "target_profit_pct": target_profit_pct,   # R:R ≥ 1.5 보장 후 삽입
+                    "stop_loss_pct":     stop_loss_pct,       # 최대 5.0% 보장 후 삽입
                 }
             )
             if len(validated) == 2:

@@ -1238,8 +1238,8 @@ def main() -> None:
     parser.add_argument(
         "--top",
         type=int,
-        default=30,
-        help="분석할 상위 코인 수 (거래대금 기준)",
+        default=15,
+        help="분석할 상위 코인 수 (거래대금 기준, 기본 15 — 토큰 비용 절감)",
     )
     parser.add_argument(
         "--candles",
