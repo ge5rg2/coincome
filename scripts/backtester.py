@@ -261,11 +261,14 @@ _SYSTEM_PROMPT = """\
    - BTC/KRW RSI14 < 45이면 알트코인 픽 극도로 자제
    - BTC/KRW 현재가가 MA20 아래에 있고 RSI14 < 50이면 알트코인 진입 금지
 
-2. 손절폭 — 휩쏘 방어 (유지):
+2. 손절폭 — 범위 제한 (7%~9% 구간):
    - stop_loss_pct = ATR% × 2~3배 (최소 7% 이상 필수)
-   - ATR% 3%대 기준: stop_loss_pct 7~9%
-   - ATR% 5% 이상: stop_loss_pct 10~15%
+   - ATR% 3%대 기준: stop_loss_pct 7~9% (정상 범위)
    - stop_loss_pct 7% 미만으로 절대 설정하지 말 것 (좁은 손절 = 휩쏘 직격)
+   - [하드 상한] stop_loss_pct가 9.0%를 초과하는 종목은 타점이 아무리 좋아도
+     절대 진입하지 말고 반드시 패스할 것
+     (변동성 과대 → 한 번에 -10% 이상 딥 손절 위험 / 손익비 구조 붕괴 / 휩쏘 직격)
+     → ATR%가 높아서 stop_loss_pct가 9%를 넘어야만 하는 종목은 고변동성 잡알트로 판단해 스킵
 
 3. 목표가 — 현실적 스윙 도달 범위:
    - target_profit_pct는 4.0% ~ 7.0% 사이에서 직전 저항선을 고려해 설정
@@ -499,6 +502,14 @@ def parse_picks(raw: str) -> list[dict]:
         raw_stop = abs(float(p.get("stop_loss_pct", 7.5) or 7.5))
         # 스나이퍼 v2 하드 하한: stop_loss_pct 7% 미만이면 강제 보정 (휩쏘 방어)
         stop_loss_pct = max(raw_stop, 7.0)
+        # 고변동성 하드 상한: stop_loss_pct 9% 초과 종목 강제 스킵 (딥 손절 차단)
+        # → AI가 프롬프트 지시를 어기고 9% 초과 종목을 픽할 경우 코드 레벨에서 이중 차단
+        if stop_loss_pct > 9.0:
+            logger.debug(
+                "고변동성 스킵: %s stop_loss_pct=%.1f%% (상한 9%% 초과 — 딥 손절 위험)",
+                symbol, stop_loss_pct,
+            )
+            continue
         # 포지션 사이징 하드 룰: weight_pct = 20.0 고정 (AI 응답값 무시)
         # → 리스크 관리·현금 확보를 위해 시장 상황·점수와 무관하게 항상 20%
         weight_pct = 20.0
