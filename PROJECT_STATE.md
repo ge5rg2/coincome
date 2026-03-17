@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-17 (최종 수정: 2026-03-17 — 스나이퍼 v2 전략 적용)
+> **기준일**: 2026-03-17 (최종 수정: 2026-03-17 — 스마트 청산 로직 v4 적용)
 > **현재 작업 브랜치**: `backtest`
 > **최신 안정 브랜치**: `dev` (커밋 `4abaaf5`)
 
@@ -252,7 +252,7 @@ coincome/
 | 우선순위 | 항목 | 관련 브랜치 |
 |---|---|---|
 | 🔴 높음 | **PR #35 리뷰·병합** — 백테스터를 `dev`에 통합 | `backtest` → `dev` |
-| 🟡 보통 | 스나이퍼 v2 전략 재실행 후 승률 재검증 | `backtest` |
+| 🟡 보통 | 스마트 청산 v4 적용 후 Claude API 단독 재백테스트 (`--model anthropic`) | `backtest` |
 | 🟡 보통 | AI 매매 성과 리포트 (실전 이력 집계 → Discord DM) | 신규 브랜치 필요 |
 | 🟢 낮음 | `feat`, `feat-new` 브랜치 정리(삭제) | — |
 
@@ -338,3 +338,31 @@ python scripts/backtester.py --model all --candles 200 --budget 500000
 | ERROR 결과 처리 | CSV에 PnL 0.0으로 기록 (통계 오염) | **SKIP 처리 — CSV 제외, 잔고 변동 없음** |
 | 미래 봉 검증 | 없음 | **MIN_FUTURE_CANDLES=5 미달 시 조기 경고 + SKIP** |
 | 비정상 봉 필터 | 없음 | **high<0, low<0, high<low 봉 자동 필터링** |
+
+### ✅ 스마트 청산 로직 v4 적용 (2026-03-17)
+
+**배경**: 승률 57~71%로 향상됐지만 평균 익절 +5%, 평균 손절 -8%의 역 손익비로 ROI 부진.
+
+| 항목 | 변경 전 | 변경 후 |
+|---|---|---|
+| 시뮬레이션 결과 타입 | WIN / LOSS / TIMEOUT / SKIP | WIN / LOSS / **BREAKEVEN** / TIMEOUT / SKIP |
+| 본절 이동 (BREAKEVEN) | 없음 | **High +3.5% 달성 시 플래그 ON → Low +0.5% 하락 시 즉시 청산 (pnl +0.5%)** |
+| 시간 청산 (TIME EXIT) | 없음 | **12봉(48시간) 경과 후 WIN/BREAKEVEN 미달 시 12번째 close 기준 강제 TIMEOUT** |
+| 장기 손절 위험 차단 | 30봉 만기까지 -8% 손절 위험 유지 | **48시간 이후 방향성 없는 포지션 조기 청산** |
+| 통계 리포트 | WIN / LOSS / 타임아웃 3가지 | **WIN / LOSS / 본절(BE) / 타임아웃 4가지** |
+
+**신규 상수** (`scripts/backtester.py`):
+
+| 상수 | 값 | 설명 |
+|---|---|---|
+| `BREAKEVEN_TRIGGER_PCT` | `3.5` | 본절 이동 발동 기준 (진입가 대비 High +3.5%) |
+| `BREAKEVEN_EXIT_PCT` | `0.5` | 본절 청산 레벨 (진입가 대비 +0.5%) |
+| `TIME_EXIT_CANDLES` | `12` | 시간 청산 봉 수 (4h × 12 = 48시간) |
+
+**청산 우선순위** (동일 봉 내 복수 조건 충족 시):
+```
+[1] WIN       — target_price 도달 (최우선)
+[2] BREAKEVEN — breakeven 활성화 후 +0.5% 이하 하락 (LOSS 대체)
+[3] LOSS      — 원래 손절선 도달 (breakeven 미활성 구간에서만)
+[4] TIMEOUT   — 12봉 경과 (방향성 미결정 조기 청산)
+```
