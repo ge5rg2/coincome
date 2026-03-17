@@ -87,8 +87,8 @@ MIN_FUTURE_CANDLES = 5
 BREAKEVEN_TRIGGER_PCT: float = 3.5
 # 본절 청산 레벨: 활성화 후 Low가 진입가+이 % 이하로 내려오면 BREAKEVEN 청산
 BREAKEVEN_EXIT_PCT: float = 0.5
-# 시간 청산 봉 수: 이 봉(4h × 12 = 48h) 경과 후 방향성 미결정 포지션을 강제 TIMEOUT
-TIME_EXIT_CANDLES: int = 12
+# 시간 청산 봉 수: 이 봉(4h × 18 = 72h) 경과 후 방향성 미결정 포지션을 강제 TIMEOUT
+TIME_EXIT_CANDLES: int = 18
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ class GeminiAdapter:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 시스템 프롬프트 (스나이퍼 전략 v3 — Score 90+, 손절 7%+, 목표 4~7%, BTC 국면 필터)
+# 시스템 프롬프트 (스나이퍼 전략 v4 — Score 90+, RSI 30~45 역추세 스나이핑, BTC 국면 필터)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
@@ -277,10 +277,13 @@ _SYSTEM_PROMPT = """\
    - weight_pct는 시장 상황·점수·변동성·픽 수에 관계없이 반드시 **20.0**으로만 설정할 것
    - 리스크 관리 및 현금 확보를 위한 고정 룰이므로 예외 없이 20.0만 허용 (증감 불가)
 
-5. 진입 조건 (모두 충족 시에만 픽):
+5. 진입 타점 — 역추세 스나이핑 (낙폭 과대/눌림목 포착):
    - score 90 이상 (절대 90 미만 진입 금지 — 진입 빈도를 낮춰야 한다)
-   - RSI14 35~60 구간 (상승 여력이 있는 중립~반등 구간)
-   - MA20 지지 또는 직전 저항 돌파 확인
+   - [최우선] RSI14 30~45 구간: 낙폭 과대 또는 눌림목에서 반등 신호가 보이는 종목을
+     최우선으로 탐색할 것. RSI 40 부근에서 바닥을 다지고 반등 조짐이 있는
+     역추세 타점이 가장 이상적이다.
+   - MA20 위에서 RSI가 이미 55 이상으로 상승 중인 종목은 추격 매수 자제
+     (이미 많이 오른 종목은 목표가 도달 전 되돌림 위험이 크다 — 상승 추세 추격 금지)
    - 24h 거래대금 50억 KRW 이상 (유동성 확보)
    - 과매수 구간(RSI14 > 65) 진입 금지
 
@@ -532,7 +535,7 @@ def simulate_trade_from_data(
       - BREAKEVEN (본절 방어막): 반익 없이 High +BREAKEVEN_TRIGGER_PCT(3.5%) 달성 후
           Low가 +BREAKEVEN_EXIT_PCT(0.5%) 이하로 하락 시 전량 본절 청산.
           → 트레일링 스탑 폐기. 수익 구간 진입 후 되돌림 시 최소 +0.5% 보장.
-      - TIME EXIT (시간 청산): TIME_EXIT_CANDLES(12봉=48h) 경과 후 강제 TIMEOUT.
+      - TIME EXIT (시간 청산): TIME_EXIT_CANDLES(18봉=72h) 경과 후 강제 TIMEOUT.
           방향성 없는 포지션의 장기 손절(-7%+) 위험 조기 차단.
       - LOSS: 본절 미활성 구간에서 원래 손절가 도달 시 전량 청산.
 
@@ -599,7 +602,7 @@ def simulate_trade_from_data(
         if not breakeven_activated and low <= stop_price:
             return {"result": "LOSS", "pnl_pct": -stop_pct, "candles_held": i + 1}
 
-        # ── [우선순위 4] TIME EXIT: 48시간(12봉) 경과 → 강제 TIMEOUT ──────────
+        # ── [우선순위 4] TIME EXIT: 72시간(18봉) 경과 → 강제 TIMEOUT ──────────
         if i == TIME_EXIT_CANDLES - 1:
             pnl = (close - entry_price) / entry_price * 100
             return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": i + 1}
