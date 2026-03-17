@@ -743,9 +743,11 @@ async def run_backtest(args: argparse.Namespace) -> None:
 
                     logger.info(
                         "[결과] %s 시뮬레이션 완료 -> %s (%.2f%%) / 보유시간: %d봉"
-                        " | 투자: %,.0f KRW / 손익: %+,.0f KRW / 잔고: %,.0f KRW",
+                        " | 투자: %s KRW / 손익: %s KRW / 잔고: %s KRW",
                         symbol, sim["result"], sim["pnl_pct"], sim["candles_held"],
-                        invested_krw, pnl_krw, new_balance,
+                        f"{invested_krw:,.0f}",
+                        f"{pnl_krw:+,.0f}",
+                        f"{new_balance:,.0f}",
                     )
 
                     row = {
