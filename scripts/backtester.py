@@ -390,6 +390,125 @@ async def simulate_trade(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 모델별 실행 헬퍼
+# ──────────────────────────────────────────────────────────────────────────────
+
+ENV_KEY_MAP = {
+    "openai":    "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini":    "GEMINI_API_KEY",
+}
+
+ADAPTER_MAP = {
+    "openai":    OpenAIAdapter,
+    "anthropic": AnthropicAdapter,
+    "gemini":    GeminiAdapter,
+}
+
+
+async def _run_single_model(
+    platform: str,
+    api_key: str,
+    market_data: dict[str, dict],
+    user_prompt: str,
+    exchange: ccxt.Exchange,
+    args: argparse.Namespace,
+    timestamp: str,
+) -> tuple[list[dict], int, int, float]:
+    """단일 모델 픽 요청 → 시뮬레이션 → CSV 행 반환.
+
+    Returns:
+        (csv_rows, input_tokens, output_tokens, cost)
+    """
+    adapter  = ADAPTER_MAP[platform](api_key)
+    model_id = adapter.model
+    logger.info("[%s] AI 픽 요청 중...", model_id)
+
+    try:
+        ai_result = await adapter.pick(_SYSTEM_PROMPT, user_prompt)
+    except Exception as exc:
+        logger.error("[%s] AI 호출 실패: %s", model_id, exc)
+        return [], 0, 0, 0.0
+
+    input_tokens  = ai_result["input_tokens"]
+    output_tokens = ai_result["output_tokens"]
+    call_cost     = calc_cost(model_id, input_tokens, output_tokens)
+    logger.info(
+        "[%s] 응답 수신 — 입력: %d tok, 출력: %d tok, 비용: $%.6f",
+        model_id, input_tokens, output_tokens, call_cost,
+    )
+
+    picks = parse_picks(ai_result["raw"])
+    logger.info("[%s] 파싱된 픽: %s", model_id, [(p["symbol"], p["score"]) for p in picks])
+
+    if not picks:
+        logger.warning("[%s] 유효한 픽 없음.", model_id)
+        return [], input_tokens, output_tokens, call_cost
+
+    csv_rows: list[dict] = []
+    per_pick_cost = call_cost / max(len(picks), 1)
+
+    for pick in picks:
+        symbol = pick["symbol"]
+        entry  = market_data.get(symbol, {}).get("price")
+        if entry is None:
+            logger.warning("[%s] 엔트리 가격 없음: %s — 스킵", model_id, symbol)
+            continue
+
+        logger.info(
+            "[%s] 시뮬레이션: %s  진입가=%.0f  목표=+%.1f%%  손절=-%.1f%%",
+            model_id, symbol, entry, pick["target_profit_pct"], pick["stop_loss_pct"],
+        )
+        sim = await simulate_trade(
+            exchange, symbol, entry,
+            target_pct=pick["target_profit_pct"],
+            stop_pct=pick["stop_loss_pct"],
+            future_candles=args.future_candles,
+        )
+
+        csv_rows.append({
+            "Timestamp":           timestamp,
+            "Model":               model_id,
+            "Symbol":              symbol,
+            "Score":               pick["score"],
+            "Weight_Pct":          pick["weight_pct"],
+            "Entry_Price":         entry,
+            "Target_Profit_Pct":   pick["target_profit_pct"],
+            "Stop_Loss_Pct":       pick["stop_loss_pct"],
+            "Reason":              pick["reason"],
+            "Sim_Result":          sim["result"],
+            "Sim_PnL_Pct":         round(sim["pnl_pct"], 4),
+            "Candles_Held":        sim["candles_held"],
+            "Input_Tokens":        input_tokens,
+            "Output_Tokens":       output_tokens,
+            "Estimated_Cost_USD":  round(per_pick_cost, 6),
+        })
+
+    return csv_rows, input_tokens, output_tokens, call_cost
+
+
+def _print_model_summary(
+    model_id: str,
+    rows: list[dict],
+    input_tokens: int,
+    output_tokens: int,
+    cost: float,
+) -> None:
+    wins     = sum(1 for r in rows if r["Sim_Result"] == "WIN")
+    losses   = sum(1 for r in rows if r["Sim_Result"] == "LOSS")
+    timeouts = sum(1 for r in rows if r["Sim_Result"] == "TIMEOUT")
+    total    = len(rows)
+    win_rate = wins / total * 100 if total else 0.0
+    avg_pnl  = sum(r["Sim_PnL_Pct"] for r in rows) / total if total else 0.0
+    sep = "─" * 55
+    print(f"\n  ┌ 모델: {model_id}")
+    print(f"  │ 픽 수: {total}  승={wins} 패={losses} 타임아웃={timeouts}  "
+          f"승률={win_rate:.1f}%  평균PnL={avg_pnl:+.2f}%")
+    print(f"  │ 토큰: 입력={input_tokens:,}  출력={output_tokens:,}  비용=${cost:.6f}")
+    print(f"  └{'─' * 53}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 메인 백테스트 루프
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -400,28 +519,32 @@ async def run_backtest(args: argparse.Namespace) -> None:
     result_csv = RESULT_DIR / f"backtest_results_{timestamp}.csv"
     logger.info("결과 저장 경로: %s", result_csv)
 
-    # ── AI 어댑터 초기화 ──────────────────────────────────────────────────────
-    api_key = args.api_key
-    if not api_key:
-        env_map = {
-            "openai":    "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "gemini":    "GEMINI_API_KEY",
-        }
-        api_key = os.getenv(env_map.get(args.model, ""), "")
-    if not api_key:
-        logger.error(
-            "API 키가 없습니다. --api-key 옵션 또는 환경변수로 설정하세요. "
-            "(OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY)"
-        )
+    # ── 실행할 플랫폼 목록 결정 ───────────────────────────────────────────────
+    if args.model == "all":
+        platforms = ["openai", "anthropic", "gemini"]
+    else:
+        platforms = [args.model]
+
+    # ── 플랫폼별 API 키 확인 ──────────────────────────────────────────────────
+    # --api-key 는 단일 모델일 때만 유효; all 모드에서는 환경변수만 사용
+    api_keys: dict[str, str] = {}
+    for platform in platforms:
+        key = args.api_key if args.model != "all" else ""
+        if not key:
+            key = os.getenv(ENV_KEY_MAP[platform], "")
+        if key:
+            api_keys[platform] = key
+        else:
+            logger.warning(
+                "[%s] API 키 없음 — 환경변수 %s 미설정, 해당 모델 스킵",
+                platform.upper(), ENV_KEY_MAP[platform],
+            )
+
+    if not api_keys:
+        logger.error("실행 가능한 모델이 없습니다. API 키를 확인하세요.")
         sys.exit(1)
 
-    adapter_cls = {"openai": OpenAIAdapter, "anthropic": AnthropicAdapter, "gemini": GeminiAdapter}[args.model]
-    adapter = adapter_cls(api_key)
-    model_id = adapter.model
-    logger.info("사용 모델: %s", model_id)
-
-    # ── 거래소 초기화 ──────────────────────────────────────────────────────────
+    # ── 거래소 초기화 및 시장 데이터 수집 (공통, 1회) ─────────────────────────
     exchange = ccxt.upbit()
     try:
         logger.info("Upbit 마켓 데이터 로딩 중...")
@@ -442,113 +565,72 @@ async def run_backtest(args: argparse.Namespace) -> None:
             logger.error("유효한 시장 데이터가 없습니다.")
             return
 
-        # ── AI 픽 요청 ────────────────────────────────────────────────────────
         user_prompt = build_user_prompt(market_data, budget_krw=args.budget)
-        logger.info("AI에게 매수 픽 요청 중 (model=%s)...", model_id)
 
-        try:
-            ai_result = await adapter.pick(_SYSTEM_PROMPT, user_prompt)
-        except Exception as exc:
-            logger.error("AI 호출 실패: %s", exc)
-            return
+        # ── 모델별 순차 실행 ──────────────────────────────────────────────────
+        all_csv_rows:      list[dict] = []
+        total_input_tokens  = 0
+        total_output_tokens = 0
+        total_cost          = 0.0
+        per_model_stats: list[tuple] = []  # (model_id, rows, in_tok, out_tok, cost)
 
-        raw_response  = ai_result["raw"]
-        input_tokens  = ai_result["input_tokens"]
-        output_tokens = ai_result["output_tokens"]
-        call_cost     = calc_cost(model_id, input_tokens, output_tokens)
-
-        logger.info(
-            "AI 응답 수신 — 입력 토큰: %d, 출력 토큰: %d, 비용: $%.6f",
-            input_tokens, output_tokens, call_cost,
-        )
-
-        picks = parse_picks(raw_response)
-        logger.info("파싱된 픽: %s", [(p["symbol"], p["score"]) for p in picks])
-
-        if not picks:
-            logger.warning("유효한 픽이 없습니다. 결과 없이 종료합니다.")
-            return
-
-        # ── 누적 토큰·비용 집계 ───────────────────────────────────────────────
-        total_input_tokens  = input_tokens
-        total_output_tokens = output_tokens
-        total_cost          = call_cost
-
-        # ── 시뮬레이션 + CSV 작성 ─────────────────────────────────────────────
-        csv_rows: list[dict] = []
-
-        for pick in picks:
-            symbol = pick["symbol"]
-            entry  = market_data[symbol]["price"] if symbol in market_data else None
-            if entry is None:
-                logger.warning("엔트리 가격 없음: %s — 스킵", symbol)
+        for platform in platforms:
+            if platform not in api_keys:
                 continue
-
-            logger.info(
-                "시뮬레이션: %s  진입가=%.0f  목표=+%.1f%%  손절=-%.1f%%",
-                symbol, entry, pick["target_profit_pct"], pick["stop_loss_pct"],
+            rows, in_tok, out_tok, cost = await _run_single_model(
+                platform, api_keys[platform],
+                market_data, user_prompt, exchange, args, timestamp,
             )
-            sim = await simulate_trade(
-                exchange, symbol, entry,
-                target_pct=pick["target_profit_pct"],
-                stop_pct=pick["stop_loss_pct"],
-                future_candles=args.future_candles,
-            )
-
-            pick_cost = calc_cost(model_id, input_tokens, output_tokens) / max(len(picks), 1)
-            # 주: 픽 1개당 비용은 API 호출 비용을 픽 수로 나눠 배분
-
-            csv_rows.append({
-                "Timestamp":           timestamp,
-                "Model":               model_id,
-                "Symbol":              symbol,
-                "Score":               pick["score"],
-                "Weight_Pct":          pick["weight_pct"],
-                "Entry_Price":         entry,
-                "Target_Profit_Pct":   pick["target_profit_pct"],
-                "Stop_Loss_Pct":       pick["stop_loss_pct"],
-                "Reason":              pick["reason"],
-                "Sim_Result":          sim["result"],
-                "Sim_PnL_Pct":         round(sim["pnl_pct"], 4),
-                "Candles_Held":        sim["candles_held"],
-                "Input_Tokens":        input_tokens,
-                "Output_Tokens":       output_tokens,
-                "Estimated_Cost_USD":  round(pick_cost, 6),
-            })
+            model_id = ADAPTER_MAP[platform](api_keys[platform]).model
+            per_model_stats.append((model_id, rows, in_tok, out_tok, cost))
+            all_csv_rows      += rows
+            total_input_tokens  += in_tok
+            total_output_tokens += out_tok
+            total_cost          += cost
 
         # ── CSV 파일 저장 ─────────────────────────────────────────────────────
-        if csv_rows:
-            fieldnames = list(csv_rows[0].keys())
+        if all_csv_rows:
+            fieldnames = list(all_csv_rows[0].keys())
             with result_csv.open("w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-                writer.writerows(csv_rows)
+                writer.writerows(all_csv_rows)
             logger.info("결과 저장 완료: %s", result_csv)
 
         # ── 콘솔 요약 리포트 ──────────────────────────────────────────────────
-        wins     = sum(1 for r in csv_rows if r["Sim_Result"] == "WIN")
-        losses   = sum(1 for r in csv_rows if r["Sim_Result"] == "LOSS")
-        timeouts = sum(1 for r in csv_rows if r["Sim_Result"] == "TIMEOUT")
-        total    = len(csv_rows)
-        win_rate = wins / total * 100 if total else 0.0
-        avg_pnl  = sum(r["Sim_PnL_Pct"] for r in csv_rows) / total if total else 0.0
-
         sep = "─" * 55
         print(f"\n{'=' * 55}")
         print(f"  백테스트 결과 요약")
         print(f"{'=' * 55}")
-        print(f"  모델          : {model_id}")
         print(f"  사용 심볼 수  : {len(market_data)}개")
-        print(f"  AI 픽 수      : {total}개")
+        print(f"  실행 모델     : {', '.join(s[0] for s in per_model_stats)}")
         print(f"{sep}")
-        print(f"  매매 결과")
-        print(f"  {'승 (WIN)  :':<20} {wins}회")
-        print(f"  {'패 (LOSS) :':<20} {losses}회")
-        print(f"  {'타임아웃  :':<20} {timeouts}회")
-        print(f"  {'승률      :':<20} {win_rate:.1f}%")
-        print(f"  {'평균 수익률:':<20} {avg_pnl:+.2f}%")
+
+        # 모델별 상세
+        if len(per_model_stats) > 1:
+            print("  [ 모델별 결과 ]")
+            for model_id, rows, in_tok, out_tok, cost in per_model_stats:
+                _print_model_summary(model_id, rows, in_tok, out_tok, cost)
+            print(f"{sep}")
+
+        # 전체 합산
+        total_rows = all_csv_rows
+        wins     = sum(1 for r in total_rows if r["Sim_Result"] == "WIN")
+        losses   = sum(1 for r in total_rows if r["Sim_Result"] == "LOSS")
+        timeouts = sum(1 for r in total_rows if r["Sim_Result"] == "TIMEOUT")
+        total    = len(total_rows)
+        win_rate = wins / total * 100 if total else 0.0
+        avg_pnl  = sum(r["Sim_PnL_Pct"] for r in total_rows) / total if total else 0.0
+
+        print(f"  [ 전체 합산 ]")
+        print(f"  {'총 AI 픽 수  :':<20} {total}개")
+        print(f"  {'승 (WIN)     :':<20} {wins}회")
+        print(f"  {'패 (LOSS)    :':<20} {losses}회")
+        print(f"  {'타임아웃     :':<20} {timeouts}회")
+        print(f"  {'승률         :':<20} {win_rate:.1f}%")
+        print(f"  {'평균 수익률  :':<20} {avg_pnl:+.2f}%")
         print(f"{sep}")
-        print(f"  AI 토큰 사용량")
+        print(f"  [ AI 토큰 사용량 ]")
         print(f"  {'총 입력 토큰 :':<20} {total_input_tokens:,}")
         print(f"  {'총 출력 토큰 :':<20} {total_output_tokens:,}")
         print(f"  {'총 발생 비용 :':<20} ${total_cost:.6f}")
@@ -571,9 +653,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--model",
-        choices=["openai", "anthropic", "gemini"],
+        choices=["openai", "anthropic", "gemini", "all"],
         default="openai",
-        help="사용할 AI 모델 플랫폼",
+        help="사용할 AI 모델 플랫폼 (all: 세 모델 모두 실행, 환경변수 OPENAI/ANTHROPIC/GEMINI_API_KEY 사용)",
     )
     parser.add_argument(
         "--api-key",
