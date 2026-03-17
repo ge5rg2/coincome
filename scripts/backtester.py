@@ -81,6 +81,14 @@ WARMUP_CANDLES = 21
 # 시뮬레이션에 필요한 미래 봉 최솟값 (이 미만이면 SKIP 처리 — 신규 상장·거래 정지 방어)
 MIN_FUTURE_CANDLES = 5
 
+# ── 스마트 청산 파라미터 ────────────────────────────────────────────────────────
+# 본절 이동 트리거: High가 진입가 대비 이 % 이상 도달하면 breakeven_activated = True
+BREAKEVEN_TRIGGER_PCT: float = 3.5
+# 본절 청산 레벨: 활성화 후 Low가 진입가+이 % 이하로 내려오면 BREAKEVEN 청산
+BREAKEVEN_EXIT_PCT: float = 0.5
+# 시간 청산 봉 수: 이 봉(4h × 12 = 48h) 경과 후 방향성 미결정 포지션을 강제 TIMEOUT
+TIME_EXIT_CANDLES: int = 12
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # 비용 계산 헬퍼
@@ -514,10 +522,19 @@ def simulate_trade_from_data(
     target_pct:   float,
     stop_pct:     float,
 ) -> dict[str, Any]:
-    """사전 수집된 미래 봉 데이터로 익절/손절/타임아웃 시뮬레이션을 실행한다.
+    """사전 수집된 미래 봉 데이터로 익절/손절/본절/타임아웃 시뮬레이션을 실행한다.
 
     entry_price 기준으로 future_ohlcv의 각 봉 high/low를 순서대로 확인한다.
-    동일 봉에서 익절·손절 조건이 모두 충족되면 익절(WIN)을 우선한다.
+    동일 봉에서 복수 조건이 충족될 경우 WIN > BREAKEVEN > LOSS 우선순위를 적용한다.
+
+    [스마트 청산 로직 v4]
+      - BREAKEVEN (본절 이동):
+          High가 진입가+BREAKEVEN_TRIGGER_PCT(3.5%) 달성 시 breakeven_activated=True.
+          활성화 이후 Low가 진입가+BREAKEVEN_EXIT_PCT(0.5%) 이하로 내려오면 즉시 청산.
+          → 수익 구간 진입 후 되돌림 시 원금 보전. 기존 LOSS 조건보다 우선 적용.
+      - TIME EXIT (시간 청산):
+          TIME_EXIT_CANDLES(12봉 = 48시간) 경과 후 WIN/BREAKEVEN 미달 시
+          해당 봉 종가 기준 강제 TIMEOUT 청산. -8% 손절 위험 포지션 조기 정리.
 
     신규 상장·거래 정지 등으로 미래 봉이 부족하거나 비정상적인 경우
     "SKIP"을 반환한다. SKIP 결과는 메인 루프에서 CSV에 포함되지 않는다.
@@ -529,7 +546,8 @@ def simulate_trade_from_data(
         stop_pct:     손절률 (양수 %).
 
     Returns:
-        {"result": "WIN"|"LOSS"|"TIMEOUT"|"SKIP", "pnl_pct": float, "candles_held": int}
+        {"result": "WIN"|"LOSS"|"BREAKEVEN"|"TIMEOUT"|"SKIP",
+         "pnl_pct": float, "candles_held": int}
     """
     # ── 기본 유효성 검사 ──────────────────────────────────────────────────────
     if not future_ohlcv or entry_price <= 0:
@@ -553,19 +571,44 @@ def simulate_trade_from_data(
         # 유효 봉이 아예 없으면 SKIP (CSV 제외 대상)
         return {"result": "SKIP", "pnl_pct": 0.0, "candles_held": 0}
 
-    # ── 정상 시뮬레이션 ──────────────────────────────────────────────────────
-    target_price = entry_price * (1 + target_pct / 100)
-    stop_price   = entry_price * (1 - stop_pct  / 100)
+    # ── 진입 가격 기준 각종 청산 레벨 사전 계산 ──────────────────────────────
+    target_price            = entry_price * (1 + target_pct             / 100)
+    stop_price              = entry_price * (1 - stop_pct               / 100)
+    breakeven_trigger_price = entry_price * (1 + BREAKEVEN_TRIGGER_PCT  / 100)
+    breakeven_exit_price    = entry_price * (1 + BREAKEVEN_EXIT_PCT     / 100)
+
+    breakeven_activated = False  # 본절 이동 플래그
 
     for i, candle in enumerate(valid_ohlcv):
-        high = candle[2]
-        low  = candle[3]
-        if high >= target_price:
-            return {"result": "WIN",  "pnl_pct": target_pct,  "candles_held": i + 1}
-        if low <= stop_price:
-            return {"result": "LOSS", "pnl_pct": -stop_pct,   "candles_held": i + 1}
+        high  = candle[2]
+        low   = candle[3]
+        close = candle[4]
 
-    # 타임아웃 — 마지막 봉 종가 기준 수익률
+        # ── 본절 트리거 체크: 이번 봉 high가 진입가+3.5% 이상이면 활성화 ──────
+        if not breakeven_activated and high >= breakeven_trigger_price:
+            breakeven_activated = True
+
+        # ── [우선순위 1] WIN: 목표가 도달 ──────────────────────────────────────
+        if high >= target_price:
+            return {"result": "WIN", "pnl_pct": target_pct, "candles_held": i + 1}
+
+        # ── [우선순위 2] BREAKEVEN: 본절 활성화 후 진입가+0.5% 이하 하락 ────────
+        # 수익 구간 진입 후 되돌림 — LOSS보다 높은 레벨(+0.5%)에서 선제 청산
+        if breakeven_activated and low <= breakeven_exit_price:
+            return {"result": "BREAKEVEN", "pnl_pct": BREAKEVEN_EXIT_PCT, "candles_held": i + 1}
+
+        # ── [우선순위 3] LOSS: 원래 손절선 (본절 미활성 구간에서만 발동) ─────────
+        # breakeven 활성화 이후에는 +0.5% 본절선이 실질적 스톱이므로 LOSS 불필요
+        if not breakeven_activated and low <= stop_price:
+            return {"result": "LOSS", "pnl_pct": -stop_pct, "candles_held": i + 1}
+
+        # ── [우선순위 4] TIME EXIT: 48시간(12봉) 경과 → 방향성 미결정 강제 청산 ──
+        # 장기 타임아웃(-8% 위험)을 차단하고 12번째 봉 종가 기준 조기 정리
+        if i == TIME_EXIT_CANDLES - 1:
+            pnl = (close - entry_price) / entry_price * 100
+            return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": i + 1}
+
+    # ── 최종 타임아웃 (30봉 전체 경과 — TIME_EXIT 이후에도 청산 미발동 케이스) ──
     last_close = valid_ohlcv[-1][4]
     pnl = (last_close - entry_price) / entry_price * 100
     return {"result": "TIMEOUT", "pnl_pct": round(pnl, 4), "candles_held": len(valid_ohlcv)}
@@ -597,14 +640,15 @@ def _print_model_summary(
     initial_balance: float = 1_000_000,
     final_balance: float | None = None,
 ) -> None:
-    wins     = sum(1 for r in rows if r["Sim_Result"] == "WIN")
-    losses   = sum(1 for r in rows if r["Sim_Result"] == "LOSS")
-    timeouts = sum(1 for r in rows if r["Sim_Result"] == "TIMEOUT")
+    wins       = sum(1 for r in rows if r["Sim_Result"] == "WIN")
+    losses     = sum(1 for r in rows if r["Sim_Result"] == "LOSS")
+    breakevens = sum(1 for r in rows if r["Sim_Result"] == "BREAKEVEN")
+    timeouts   = sum(1 for r in rows if r["Sim_Result"] == "TIMEOUT")
     total    = len(rows)
     win_rate = wins / total * 100 if total else 0.0
     avg_pnl  = sum(r["Sim_PnL_Pct"] for r in rows) / total if total else 0.0
     print(f"\n  ┌ 모델: {model_id}")
-    print(f"  │ 픽 수: {total}  승={wins} 패={losses} 타임아웃={timeouts}  "
+    print(f"  │ 픽 수: {total}  승={wins} 패={losses} 본절={breakevens} 타임아웃={timeouts}  "
           f"승률={win_rate:.1f}%  평균PnL={avg_pnl:+.2f}%")
     if final_balance is not None:
         pnl_total = final_balance - initial_balance
@@ -913,10 +957,11 @@ async def run_backtest(args: argparse.Namespace) -> None:
             print(f"{sep}")
 
         # 전체 합산
-        total    = len(all_csv_rows)
-        wins     = sum(1 for r in all_csv_rows if r["Sim_Result"] == "WIN")
-        losses   = sum(1 for r in all_csv_rows if r["Sim_Result"] == "LOSS")
-        timeouts = sum(1 for r in all_csv_rows if r["Sim_Result"] == "TIMEOUT")
+        total      = len(all_csv_rows)
+        wins       = sum(1 for r in all_csv_rows if r["Sim_Result"] == "WIN")
+        losses     = sum(1 for r in all_csv_rows if r["Sim_Result"] == "LOSS")
+        breakevens = sum(1 for r in all_csv_rows if r["Sim_Result"] == "BREAKEVEN")
+        timeouts   = sum(1 for r in all_csv_rows if r["Sim_Result"] == "TIMEOUT")
         win_rate = wins / total * 100 if total else 0.0
         avg_pnl  = sum(r["Sim_PnL_Pct"] for r in all_csv_rows) / total if total else 0.0
 
@@ -928,6 +973,7 @@ async def run_backtest(args: argparse.Namespace) -> None:
         print(f"  {'총 AI 픽 수  :':<20} {total}개")
         print(f"  {'승 (WIN)     :':<20} {wins}회")
         print(f"  {'패 (LOSS)    :':<20} {losses}회")
+        print(f"  {'본절 (BE)    :':<20} {breakevens}회")
         print(f"  {'타임아웃     :':<20} {timeouts}회")
         print(f"  {'승률         :':<20} {win_rate:.1f}%")
         print(f"  {'평균 수익률  :':<20} {avg_pnl:+.2f}%")
