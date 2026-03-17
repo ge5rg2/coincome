@@ -247,14 +247,14 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 종목 
             embed_title = "🛡️ 인텔리전트 스나이퍼 모드 가동"
             embed_desc = (
                 "가용 시드의 **20%** 투입. "
-                "MDD(최대 낙폭)를 최소화(-19%)하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
+                "MDD(최대 낙폭)를 최소화하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
             )
             embed_color = discord.Color.blue()
         else:  # BEAST / SCALPING (하위 호환)
             embed_title = "🔥 야수의 심장 모드 가동"
             embed_desc = (
                 "가용 시드의 **70%** 투입. "
-                "높은 MDD(-53%)를 감수하고 폭발적인 수익을 노리는 "
+                "리스크를 감수하고 폭발적인 수익을 노리는 "
                 "**하이리스크 하이리턴 공격 모드**입니다."
             )
             embed_color = discord.Color.red()
@@ -267,13 +267,13 @@ class PaperAmountModal(discord.ui.Modal, title="🎮 AI 모의투자 — 종목 
         embed.add_field(name="AI 모의투자", value="✅ 활성화", inline=True)
         embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
         embed.add_field(name="💰 현재 가상 잔고", value=f"{self._virtual_krw:,.0f} KRW", inline=True)
-        # ── 공통 엔진(v7 전략) 설명 필드 ─────────────────────────────
+        # ── 공통 전략 설명 필드 ───────────────────────────────────────
         embed.add_field(
-            name="⚙️ 공통 엔진 — v7 알트코인 전략",
+            name="📋 전략",
             value=(
-                "**엔진:** v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
-                "**손익비:** 1.5:1 강제 (목표 익절 **6.0%** / 기계적 손절 **4.0%**)\n"
-                "**필터링:** 휩쏘 방지를 위해 무거운 메이저 코인(BTC·ETH 등) 거래 차단"
+                "v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
+                "손익비 1.5:1 강제 — 익절 **6.0%** / 손절 **4.0%**\n"
+                "BTC·ETH 등 메이저 코인 거래 차단 (휩쏘 방지)"
             ),
             inline=False,
         )
