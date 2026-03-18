@@ -76,8 +76,8 @@ class PaperStyleSelect(discord.ui.Select):
     """투자 비중 모드(SNIPER / BEAST) 드롭다운.
 
     v7 알트코인 전략 기준:
-      SNIPER — 시드 20% 투입, MDD -19% (안전 모드)
-      BEAST  — 시드 70% 투입, MDD -53% (공격 모드)
+      SNIPER — 시드 20% 투입 (안전 모드)
+      BEAST  — 시드 70% 투입 (공격 모드)
     두 모드 모두 동일한 v7 4h 엔진을 사용한다.
     """
 
@@ -86,13 +86,13 @@ class PaperStyleSelect(discord.ui.Select):
             discord.SelectOption(
                 label="🛡️ SNIPER — 시드 20% 안전 모드",
                 value="SNIPER",
-                description="MDD -19% | 4h 모멘텀 돌파 | 알트코인 집중",
+                description="4h 모멘텀 돌파 | 알트코인 집중 | 안정 우상향",
                 default=current_style in ("SNIPER", "SWING"),
             ),
             discord.SelectOption(
                 label="🔥 BEAST — 시드 70% 공격 모드",
                 value="BEAST",
-                description="MDD -53% | 동일 v7 전략, 고비중 투입",
+                description="동일 v7 전략 | 고비중 투입 | 하이리스크 하이리턴",
                 default=current_style in ("BEAST", "SCALPING"),
             ),
         ]
