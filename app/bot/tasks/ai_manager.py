@@ -909,8 +909,11 @@ class AIFundManagerTask(commands.Cog):
         total_paper = len(paper_reviewed) + len(paper_bought)
         total       = total_real + total_paper
 
-        # ── 투자 성향 레이블 ──────────────────────────────────────────
-        style_label = "⚡ 단타 (1h 봉)" if trade_style == "SCALPING" else "📊 스윙 (4h 봉)"
+        # ── 투자 비중 모드 레이블 (SNIPER·BEAST) ────────────────────────
+        if trade_style in ("BEAST", "SCALPING"):
+            style_label = "🔥 야수 모드 (BEAST)"
+        else:  # SNIPER / SWING (하위 호환)
+            style_label = "🛡️ 스나이퍼 모드 (SNIPER)"
 
         # ── 컬러·제목 결정 ────────────────────────────────────────────
         color = discord.Color.blue() if total > 0 else discord.Color.greyple()
