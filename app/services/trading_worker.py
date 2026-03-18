@@ -183,7 +183,14 @@ class TradingWorker:
             logger.exception("워커 오류: setting_id=%s error=%s", self.setting_id, exc)
             await self.notify(self.user_id, f"⚠️ [{self.symbol}] 봇 오류 발생: {exc}")
             # 예외로 인한 비정상 종료는 DB 정리 (수동 재시작 유도)
-            await self._clear_position_from_db()
+            # _clear_position_from_db 자체가 실패해도 예외가 태스크 밖으로 전파되지 않도록 보호
+            try:
+                await self._clear_position_from_db()
+            except Exception as clear_exc:
+                logger.warning(
+                    "포지션 DB 초기화 실패 (무시): setting_id=%s err=%s",
+                    self.setting_id, clear_exc,
+                )
 
     # ------------------------------------------------------------------
     # 신규 진입 vs 복구 결정
@@ -254,8 +261,8 @@ class TradingWorker:
     async def _wait_for_ws_price(self) -> float:
         """WebSocket 캐시에 현재가가 수신될 때까지 최대 PRICE_WAIT_TIMEOUT 초 대기."""
         ws_manager = UpbitWebsocketManager.get()
-        deadline = asyncio.get_event_loop().time() + PRICE_WAIT_TIMEOUT
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = asyncio.get_running_loop().time() + PRICE_WAIT_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
             price = ws_manager.get_price(self.symbol)
             if price is not None:
                 return price
@@ -323,13 +330,17 @@ class TradingWorker:
 
         # ── 실거래: 업비트 시장가 매수 API 호출 ──────────────────────
         order = await self.exchange.create_market_buy_order(self.symbol, safe_buy_amount)
-        amount_coin = float(order.get("filled", 0)) or (safe_buy_amount / current_price)
+        # order.get("average"): ccxt upbit 시장가 매수의 실제 체결가 (가중평균)
+        # None이면 WebSocket 스냅샷 current_price로 폴백
+        fill_price  = float(order.get("average") or current_price)
+        amount_coin = float(order.get("filled", 0)) or (safe_buy_amount / fill_price)
 
         # 포지션 메모리 기록
-        # buy_amount_krw 는 유저가 설정한 원래 금액을 유지 (수익률 계산 기준 일관성)
+        # buy_price는 실제 체결가(fill_price)를 사용 — 수익률 계산 기준 정확성 확보
+        # buy_amount_krw 는 유저가 설정한 원래 금액을 유지 (투자금액 표시 기준 일관성)
         self._position = Position(
             symbol=self.symbol,
-            buy_price=current_price,
+            buy_price=fill_price,
             amount_coin=amount_coin,
             buy_amount_krw=self.buy_amount_krw,
             target_profit_pct=self.target_profit_pct,
@@ -337,12 +348,12 @@ class TradingWorker:
         )
 
         # ── 체결 결과 DB 저장 (재시작 복구 기준값) ──────────────────
-        await self._save_position_to_db(current_price, amount_coin)
+        await self._save_position_to_db(fill_price, amount_coin)
 
         await self.notify(
             self.user_id,
             f"✅ **매수 체결** `{self.symbol}`\n"
-            f"매수가: {format_krw_price(current_price)} KRW\n"
+            f"매수가: {format_krw_price(fill_price)} KRW (실제 체결가)\n"
             f"수량: {amount_coin:.6f}\n"
             f"투자금액: {safe_buy_amount:,.0f} KRW (수수료 여유분 0.1% 제외)",
         )
@@ -462,8 +473,8 @@ class TradingWorker:
             # 현재 웹소켓 가격을 가상 매도 체결가로 사용
             sell_price = current_price
             sell_amount = pos.amount_coin
-            proceeds = sell_price * sell_amount                    # 매도 총 수령액 (KRW)
-            realized_pnl = (sell_price - pos.buy_price) * sell_amount  # 순수익 (KRW)
+            proceeds = sell_price * sell_amount * 0.9995           # 매도 총 수령액 (KRW, 수수료 0.05% 차감)
+            realized_pnl = proceeds - pos.buy_price * sell_amount  # 순수익 (KRW, 실제 수취금 기준)
 
             # 가상 잔고 복원 (체결 대금 전액 합산)
             async with AsyncSessionLocal() as db:

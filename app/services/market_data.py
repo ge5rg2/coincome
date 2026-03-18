@@ -24,6 +24,7 @@ MarketDataManager: AI 자동 매매를 위한 시장 데이터 캐싱 관리자.
         # ── Swing (4h 봉) 지표 ─────────────────────────────────────
         "rsi14":        float | None, # 4h RSI(14)
         "ma20":         float | None, # 4h 20봉 이동평균
+        "ma50":         float | None, # 4h 50봉 이동평균 (v7 전략 핵심: Close > MA50 조건)
         "candles":      list[dict],   # 최근 5개 4h 봉 요약
         # ── Scalping (1h 봉) 지표 ──────────────────────────────────
         "rsi14_1h":     float | None, # 1h RSI(14)
@@ -56,7 +57,7 @@ TOP_N            = 10    # 1차 스크리닝 선택 코인 수
 CHUNK_SIZE       = 100   # fetch_tickers() 1회 호출 시 최대 심볼 수 (URL 길이 제한 방어)
 CHUNK_SLEEP      = 0.3   # 청크 간 Rate-Limit 방지 대기 (초)
 REFRESH_INTERVAL = 1 * 3600  # 캐시 갱신 주기 (초) — 1h 단타 모드를 위해 1시간으로 단축
-OHLCV_LIMIT      = 60    # 4h 봉 캔들 수 (RSI14 + MA20 계산에 충분)
+OHLCV_LIMIT      = 100   # 4h 봉 캔들 수 (RSI14 + MA20 + MA50 계산에 충분, 최소 50+여유 필요)
 OHLCV_LIMIT_1H   = 60    # 1h 봉 캔들 수 (ATR14 계산 포함)
 OHLCV_LIMIT_15M  = 60    # 15m 봉 캔들 수 (단기 진입 타점 필터용)
 COIN_SLEEP       = 0.8   # 코인별 fetch 완료 후 다음 코인으로 넘어가기 전 대기 (초)
@@ -258,7 +259,7 @@ class MarketDataManager:
           2. 심볼 리스트를 CHUNK_SIZE 개씩 분할해 fetch_tickers(chunk) 반복 호출 후 병합
           3. quoteVolume 내림차순 정렬 → 상위 TOP_N 심볼 추출
           4. 각 심볼별:
-             a. 4h OHLCV → RSI14·MA20 계산 (Swing용)
+             a. 4h OHLCV → RSI14·MA20·MA50 계산 (Swing용, MA50은 v7 진입 조건)
              b. 0.3초 대기 → 1h OHLCV → RSI14·MA20·ATR14·ATR% 계산 (Scalping + 변동성)
              c. 0.3초 대기 → 15m OHLCV → RSI14·MA20 계산 (단기 진입 타점 필터)
              d. del df 로 메모리 즉시 해제
@@ -351,6 +352,7 @@ class MarketDataManager:
                     close4  = df4["close"]
                     rsi14   = _calc_rsi(close4, 14)
                     ma20    = _calc_ma(close4, 20)
+                    ma50    = _calc_ma(close4, 50)   # v7 전략 핵심 조건: Close > MA50
                     candles = _ohlcv_to_candles(ohlcv_4h)
                     price   = float(ohlcv_4h[-1][4])
                     del df4
@@ -358,6 +360,7 @@ class MarketDataManager:
                     logger.warning("4h OHLCV 데이터 없음: %s", symbol)
                     rsi14   = None
                     ma20    = None
+                    ma50    = None
                     candles = []
                     price   = 0.0
 
@@ -367,6 +370,7 @@ class MarketDataManager:
                     "volume_krw": ticker_info.get("quoteVolume"),
                     "rsi14":      rsi14,
                     "ma20":       ma20,
+                    "ma50":       ma50,
                     "candles":    candles,
                 })
 
@@ -444,11 +448,12 @@ class MarketDataManager:
 
                 logger.info(
                     "캐싱 완료: %-10s  가격=%s  ATR%%=%.2f  "
-                    "RSI4h=%.1f  |  RSI1h=%.1f  |  RSI15m=%.1f",
+                    "RSI4h=%.1f  MA50=%s  |  RSI1h=%.1f  |  RSI15m=%.1f",
                     symbol,
                     f"{price:,.0f}",
                     atr_pct   if atr_pct   is not None else float("nan"),
                     rsi14     if rsi14     is not None else float("nan"),
+                    f"{ma50:,.0f}" if ma50 is not None else "N/A",
                     rsi14_1h  if rsi14_1h  is not None else float("nan"),
                     rsi14_15m if rsi14_15m is not None else float("nan"),
                 )

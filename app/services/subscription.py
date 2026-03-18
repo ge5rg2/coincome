@@ -45,9 +45,12 @@ async def expiry_reminder_loop(notify_callback) -> None:
     """
     구독 만료 N일 전 사용자에게 DM 알림.
     notify_callback: async def (user_id: str, message: str)
+
+    봇 시작 직후 즉시 1회 체크한 뒤 CHECK_INTERVAL 주기로 반복한다.
+    (기존: sleep 먼저 → 최초 알림까지 1시간 대기. 수정: 즉시 체크 후 sleep)
     """
     while True:
-        await asyncio.sleep(CHECK_INTERVAL)
+        # ── 만료 임박 구독자 체크 (루프 시작 즉시 실행, 이후 sleep) ──
         threshold = datetime.now(tz=timezone.utc) + timedelta(days=RENEWAL_NOTICE_DAYS)
         async with AsyncSessionLocal() as db:
             result = await db.execute(
@@ -72,3 +75,5 @@ async def expiry_reminder_loop(notify_callback) -> None:
                 await notify_callback(user.user_id, msg)
             except Exception as exc:
                 logger.warning("만료 알림 실패: user=%s err=%s", user.user_id, exc)
+
+        await asyncio.sleep(CHECK_INTERVAL)
