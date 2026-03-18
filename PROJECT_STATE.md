@@ -1,8 +1,8 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-18 (최종 수정: 2026-03-18 — fix: market_data.py 4h MA50 지표 계산 누락 버그 픽스)
+> **기준일**: 2026-03-18 (최종 수정: 2026-03-18 — fix: 백엔드 서비스 레이어 전면 리팩토링 및 엣지 케이스 버그 픽스 완료)
 > **현재 작업 브랜치**: `dev`
-> **최신 안정 브랜치**: `dev` (커밋 `836bb38`)
+> **최신 안정 브랜치**: `dev` (커밋 `072a2ce`)
 
 ---
 
@@ -249,7 +249,8 @@ coincome/
 
 | 커밋 | 날짜 | 내용 |
 |---|---|---|
-| (최신) | 2026-03-18 | fix(market): market_data.py 4h MA50 지표 계산 누락 버그 픽스 — OHLCV_LIMIT 60→100, MA50 계산·캐싱 추가 |
+| `072a2ce` | 2026-03-18 | fix(services): 백엔드 서비스 레이어 전면 리팩토링 및 엣지 케이스 버그 픽스 — 실전 매수 체결가 정확화(fill_price), asyncio 3.10+ 호환, API 타임아웃 10s, review_positions MA50 주입, 0.0 falsy 버그, 모의투자 수수료 차감, 빈 WebSocket 구독 방어, subscription 즉시 체크 |
+| `037b7a8` | 2026-03-18 | fix(market): market_data.py 4h MA50 지표 계산 누락 버그 픽스 — OHLCV_LIMIT 60→100, MA50 계산·캐싱 추가 |
 | `952ff42` | 2026-03-18 | fix(prompt): 프롬프트 내 BTC 명시 추가 제거 |
 | `7dc13ce` | 2026-03-18 | fix(ai): BTC 환각 버그 픽스 · 스나이퍼/비스트 레이블 전면 교체 |
 | `e509e0a` | 2026-03-18 | docs(state): UI/UX 피드백 반영 — Embed 정제 + 모달 입력 최적화 기록 |
