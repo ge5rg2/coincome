@@ -413,7 +413,7 @@ class AITraderService:
             if symbol in holding_symbols:
                 continue
 
-            # score 파싱 및 80점 미만 필터
+            # score 파싱 및 90점 미만 필터
             try:
                 score = max(0, min(100, int(p.get("score", 0) or 0)))
             except (ValueError, TypeError):
@@ -511,16 +511,18 @@ class AITraderService:
             atr_pct   = mdata.get("atr_pct")
             rsi14_4h  = mdata.get("rsi14")
             ma20_4h   = mdata.get("ma20")
+            ma50_4h   = mdata.get("ma50")       # v7 핵심: 4h MA50 장기 추세 필터 (Close > MA50)
             rsi14_1h  = mdata.get("rsi14_1h")
             ma20_1h   = mdata.get("ma20_1h")
             rsi14_15m = mdata.get("rsi14_15m")
 
-            atr_str    = f"{atr_pct:.2f}%"               if atr_pct   is not None else "N/A"
-            rsi4h_str  = f"{rsi14_4h:.1f}"               if rsi14_4h  is not None else "N/A"
-            ma4h_str   = f"{format_krw_price(ma20_4h)}"  if ma20_4h   is not None else "N/A"
-            rsi1h_str  = f"{rsi14_1h:.1f}"               if rsi14_1h  is not None else "N/A"
-            ma1h_str   = f"{format_krw_price(ma20_1h)}"  if ma20_1h   is not None else "N/A"
-            rsi15m_str = f"{rsi14_15m:.1f}"              if rsi14_15m is not None else "N/A"
+            atr_str     = f"{atr_pct:.2f}%"                if atr_pct   is not None else "N/A"
+            rsi4h_str   = f"{rsi14_4h:.1f}"                if rsi14_4h  is not None else "N/A"
+            ma20_4h_str = f"{format_krw_price(ma20_4h)}"   if ma20_4h   is not None else "N/A"
+            ma50_4h_str = f"{format_krw_price(ma50_4h)}"   if ma50_4h   is not None else "N/A"
+            rsi1h_str   = f"{rsi14_1h:.1f}"                if rsi14_1h  is not None else "N/A"
+            ma1h_str    = f"{format_krw_price(ma20_1h)}"   if ma20_1h   is not None else "N/A"
+            rsi15m_str  = f"{rsi14_15m:.1f}"               if rsi14_15m is not None else "N/A"
 
             lines.append(
                 f"- {symbol}: "
@@ -529,7 +531,7 @@ class AITraderService:
                 f" | 변동성(ATR)={atr_str}"
                 f" | 15m(RSI={rsi15m_str})"
                 f" | 1h(RSI={rsi1h_str}, MA={ma1h_str})"
-                f" | 4h(RSI={rsi4h_str}, MA={ma4h_str})"
+                f" | 4h(RSI={rsi4h_str}, MA20={ma20_4h_str}, MA50={ma50_4h_str})"
             )
 
         user_prompt = "\n".join(lines)
@@ -598,24 +600,23 @@ class AITraderService:
                 )
             else:
                 # HOLD / UPDATE: 양수 강제 보정
+                # 명시적 None 체크 — `or` 연산자는 0.0을 falsy로 처리해 기본값으로 덮어쓰는 버그 방지
+                _tgt_raw = r.get("new_target_profit_pct")
+                _sl_raw  = r.get("new_stop_loss_pct")
+                new_tgt  = abs(float(
+                    _tgt_raw if _tgt_raw is not None
+                    else pos_defaults.get("target_profit_pct", 3.0)
+                ))
+                new_sl   = abs(float(
+                    _sl_raw if _sl_raw is not None
+                    else pos_defaults.get("stop_loss_pct", 2.0)
+                ))
                 validated.append(
                     {
                         "symbol": symbol,
                         "action": raw_action,
-                        "new_target_profit_pct": abs(
-                            float(
-                                r.get("new_target_profit_pct",
-                                      pos_defaults.get("target_profit_pct", 3.0))
-                                or pos_defaults.get("target_profit_pct", 3.0)
-                            )
-                        ),
-                        "new_stop_loss_pct": abs(
-                            float(
-                                r.get("new_stop_loss_pct",
-                                      pos_defaults.get("stop_loss_pct", 2.0))
-                                or pos_defaults.get("stop_loss_pct", 2.0)
-                            )
-                        ),
+                        "new_target_profit_pct": new_tgt,
+                        "new_stop_loss_pct":     new_sl,
                         "reason": str(r.get("reason", "")),
                     }
                 )
