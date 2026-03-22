@@ -1,31 +1,35 @@
 """
-AIFundManagerTask: 매시 정각에 실행되며 투자 성향(trade_style)에 따라 유저를 필터링하는 AI 펀드 매니저.
+AIFundManagerTask: 매시 정각에 실행되며 엔진 모드(ai_engine_mode)에 따라 유저를 필터링하는 AI 펀드 매니저.
 
 트리거 시각 (KST, 매시 정각):
   00:00 ~ 23:00 (24회/일)
 
-투자 성향별 동작:
-  BEAST(=SCALPING) — 매시 정각 실행 (듀얼 전략 자동 전환, 총 24회/일)
-  SNIPER(=SWING)   — 4시간 봉 마감 정각에만 실행 (01/05/09/13/17/21시 KST, 6회/일)
+엔진 모드별 동작:
+  SWING    — 4h 봉 마감 정각에만 실행 (01/05/09/13/17/21시 KST, 6회/일)
+  SCALPING — 매시 정각 실행 (1h 봉 기반 단타, 총 24회/일)
+  BOTH     — 두 엔진 동시 가동
+             SWING 엔진: 스윙 시간대(01·05·09·13·17·21시)에만 추가 실행
+             SCALPING 엔진: 매시 정각 실행
+             → 두 엔진은 완전히 독립된 예산·비중·타임프레임 사용
 
 처리 대상 (단일 OR 쿼리):
   (VIP + ai_mode_enabled=True) OR ai_paper_mode_enabled=True  — is_active=True 조건 공통
   → 두 모드를 동시에 켠 유저도 단일 _process_user 호출로 처리.
-  → 현재 시각이 SNIPER(SWING) 시간대가 아닌 경우, ai_trade_style='SNIPER'/'SWING' 유저는 스킵.
+  → SWING 유저는 스윙 시간대가 아닌 경우 스킵.
+  → SCALPING/BOTH 유저는 매시 정각 처리.
 
 격리 아키텍처:
-  ┌─ _process_user(user) ──────────────────────────────────────────┐
+  ┌─ _process_user(user, is_swing_hour) ───────────────────────────┐
   │  is_real  = VIP AND ai_mode_enabled                            │
   │  is_paper = ai_paper_mode_enabled                              │
   │                                                                │
   │  [Step 1] 실전 포지션 리뷰  (is_ai_managed=True, is_paper=False) │
   │  [Step 2] 모의 포지션 리뷰  (is_paper=True)                     │
-  │  [Step 3] 시장 분석 1회     (실전·모의 공유, API 비용 절감)      │
-  │  [Step 4] 실전 매수 사이클  → ExchangeService.create_market_buy │
-  │           BotSetting(is_ai_managed=True, is_paper=False)       │
-  │  [Step 5] 모의 매수 사이클  → virtual_krw 차감 (API 없음)       │
-  │           BotSetting(is_ai_managed=True, is_paper=True)        │
-  │  [Step 6] 단일 통합 DM Embed 발송                              │
+  │  [Step 3a] SWING 분석·매수  (is_swing_hour=True 시에만)         │
+  │            → ai_swing_budget_krw / ai_swing_weight_pct 사용    │
+  │  [Step 3b] SCALPING 분석·매수  (매 사이클 실행)                 │
+  │            → ai_scalp_budget_krw / ai_scalp_weight_pct 사용    │
+  │  [Step 4] 단일 통합 DM Embed 발송                              │
   │           (모의 항목에는 [🎮모의] 태그 명시)                    │
   └────────────────────────────────────────────────────────────────┘
 
@@ -106,10 +110,10 @@ class AIFundManagerTask(commands.Cog):
           0. 10초 대기 (업비트 서버 캔들 롤오버 안정화)
           1. 현재 KST 시각 확인 → SWING 실행 여부 결정
           2. MarketDataManager 캐시 존재 확인
-          3. DB: 성향별 적절한 유저 조회
-             - SWING 시간대: SWING + SCALPING 유저 모두
-             - SCALPING 전용 시간대: SCALPING 유저만
-          4. 각 유저별 _process_user() 실행 (trade_style 전달)
+          3. DB: 엔진 모드별 적절한 유저 조회
+             - SWING 시간대: SWING + SCALPING + BOTH 유저 모두
+             - SCALPING 전용 시간대: SCALPING/BOTH 유저만 (SWING 유저 스킵)
+          4. 각 유저별 _process_user() 실행 (is_swing_hour 전달)
         """
         await asyncio.sleep(10)
 
@@ -150,40 +154,47 @@ class AIFundManagerTask(commands.Cog):
             logger.info("AI 펀드 매니저: 대상 유저 없음")
             return
 
-        # 4. 성향별 필터링:
+        # 4. 엔진 모드별 필터링:
         #    - SWING 시간대: 모든 유저 처리
-        #    - SCALPING 전용 시간대: SCALPING 유저만 처리 (SWING 유저 스킵)
+        #    - SCALPING 전용 시간대: SCALPING/BOTH 유저만 처리 (SWING 유저 스킵)
         if is_swing_hour:
             target_users = all_users
         else:
             target_users = [
-                u for u in all_users if u.ai_trade_style == "SCALPING"
+                u for u in all_users
+                if (getattr(u, "ai_engine_mode", "SWING") or "SWING") in ("SCALPING", "BOTH")
             ]
 
         if not target_users:
             logger.info(
-                "AI 펀드 매니저: SCALPING 유저 없음 (SWING 전용 시간대 아님, hour=%d)",
+                "AI 펀드 매니저: SCALPING/BOTH 유저 없음 (SWING 전용 시간대 아님, hour=%d)",
                 current_hour,
             )
             return
 
         # 집계 로그
-        scalping_count = sum(1 for u in target_users if u.ai_trade_style == "SCALPING")
-        swing_count    = sum(1 for u in target_users if u.ai_trade_style != "SCALPING")
+        def _get_engine(u: User) -> str:
+            return (getattr(u, "ai_engine_mode", "SWING") or "SWING").upper()
+
+        swing_count    = sum(1 for u in target_users if _get_engine(u) == "SWING")
+        scalping_count = sum(1 for u in target_users if _get_engine(u) == "SCALPING")
+        both_count     = sum(1 for u in target_users if _get_engine(u) == "BOTH")
         real_count     = sum(
             1 for u in target_users
             if u.subscription_tier == SubscriptionTier.VIP and u.ai_mode_enabled
         )
         paper_count    = sum(1 for u in target_users if u.ai_paper_mode_enabled)
         logger.info(
-            "AI 펀드 매니저 대상: 전체=%d명 (실전=%d명/모의=%d명, SWING=%d명/SCALPING=%d명)",
-            len(target_users), real_count, paper_count, swing_count, scalping_count,
+            "AI 펀드 매니저 대상: 전체=%d명 (실전=%d명/모의=%d명, "
+            "SWING=%d명/SCALPING=%d명/BOTH=%d명)",
+            len(target_users), real_count, paper_count,
+            swing_count, scalping_count, both_count,
         )
 
         # 5. 유저별 처리
         for user in target_users:
             try:
-                await self._process_user(user, market_data)
+                await self._process_user(user, market_data, is_swing_hour=is_swing_hour)
             except Exception as exc:
                 logger.error(
                     "AI 유저 처리 오류: user_id=%s err=%s", user.user_id, exc
@@ -205,23 +216,40 @@ class AIFundManagerTask(commands.Cog):
         self,
         user: User,
         market_data: dict[str, dict],
+        is_swing_hour: bool = True,
     ) -> None:
         """단일 유저에 대해 실전·모의 이중 사이클을 실행한다.
 
         처리 순서:
           1. 실전 포지션 리뷰  (is_ai_managed=True, is_paper_trading=False)
           2. 모의 포지션 리뷰  (is_paper_trading=True)
-          3. 시장 분석 1회     (실전·모의 공유 — API 비용 절감, trade_style 적용)
-          4. 실전 신규 매수    (ExchangeService 호출, VIP only)
-          5. 모의 신규 매수    (virtual_krw 차감, API 호출 없음)
-          6. 단일 통합 DM Embed 발송
+          3a. SWING 엔진 분석·매수  (engine_mode=SWING/BOTH이고 is_swing_hour=True 시에만)
+          3b. SCALPING 엔진 분석·매수  (engine_mode=SCALPING/BOTH 매 사이클)
+          4. 단일 통합 DM Embed 발송
 
         Args:
-            user:        처리 대상 User 인스턴스 (bot_settings eagerly loaded).
-            market_data: MarketDataManager.get_all() 결과.
+            user:          처리 대상 User 인스턴스 (bot_settings eagerly loaded).
+            market_data:   MarketDataManager.get_all() 결과.
+            is_swing_hour: 현재 KST 시각이 4h 봉 마감 시각인지 여부.
         """
-        user_id    = user.user_id
-        trade_style = getattr(user, "ai_trade_style", "SWING") or "SWING"
+        user_id = user.user_id
+
+        # ── 엔진 모드 결정 (V2 신규 필드 우선, 구형 ai_trade_style 하위 호환) ──
+        engine_mode = (getattr(user, "ai_engine_mode", "SWING") or "SWING").upper()
+        if engine_mode not in ("SWING", "SCALPING", "BOTH"):
+            old_style = (getattr(user, "ai_trade_style", "SWING") or "SWING").upper()
+            engine_mode = "SCALPING" if old_style in ("SCALPING", "BEAST") else "SWING"
+
+        # 현재 사이클에서 가동할 엔진 결정
+        run_swing = engine_mode in ("SWING", "BOTH") and is_swing_hour
+        run_scalp = engine_mode in ("SCALPING", "BOTH")
+
+        # 엔진별 예산·비중 (V2 필드, 기본값으로 폴백)
+        swing_budget = float(getattr(user, "ai_swing_budget_krw", 1_000_000))
+        swing_weight = float(getattr(user, "ai_swing_weight_pct", 20))
+        scalp_budget = float(getattr(user, "ai_scalp_budget_krw", 1_000_000))
+        scalp_weight = float(getattr(user, "ai_scalp_weight_pct", 20))
+
         ws_manager = UpbitWebsocketManager.get()
         registry   = WorkerRegistry.get()
 
@@ -247,7 +275,6 @@ class AIFundManagerTask(commands.Cog):
                 )
 
         # ── 모드별 실행 중 포지션 분류 ───────────────────────────────
-        # is_ai_managed=True 로 수동 봇 설정과 완전 격리
         real_running: list[BotSetting] = (
             [
                 s for s in user.bot_settings
@@ -263,10 +290,14 @@ class AIFundManagerTask(commands.Cog):
         )
 
         # ── DM 리포트 수집 버킷 ──────────────────────────────────────
-        real_reviewed:  list[dict] = []
-        real_bought:    list[dict] = []
-        paper_reviewed: list[dict] = []
-        paper_bought:   list[dict] = []
+        real_reviewed:    list[dict] = []
+        real_bought:      list[dict] = []
+        paper_reviewed:   list[dict] = []
+        paper_bought:     list[dict] = []
+        market_summaries: list[str]  = []
+
+        # 리뷰용 엔진 타입 결정 (포지션의 trade_style과 무관하게 주 엔진 사용)
+        _review_engine = "SCALPING" if engine_mode == "SCALPING" else "SWING"
 
         # ── Step 1: 실전 포지션 리뷰 ─────────────────────────────────
         if real_running:
@@ -277,7 +308,7 @@ class AIFundManagerTask(commands.Cog):
                 ws_manager=ws_manager,
                 registry=registry,
                 reviewed_positions=real_reviewed,
-                trade_style=trade_style,
+                engine_type=_review_engine,
             )
 
         # ── Step 2: 모의 포지션 리뷰 ─────────────────────────────────
@@ -289,12 +320,10 @@ class AIFundManagerTask(commands.Cog):
                 ws_manager=ws_manager,
                 registry=registry,
                 reviewed_positions=paper_reviewed,
-                trade_style=trade_style,
+                engine_type=_review_engine,
             )
 
         # ── 연착륙 분기: 종료 모드 시 신규 매수 없이 리뷰만 완료 ──────
-        # ai_is_shutting_down=True 이면 analyze_market + _buy_new_coins 를 완전히 스킵.
-        # 포지션 리뷰만 실행하고, 실전 AI 포지션이 0개가 되면 ai_mode_enabled 자동 비활성화.
         is_shutting_down: bool = bool(getattr(user, "ai_is_shutting_down", False))
         if is_shutting_down:
             embed = self._build_unified_report_embed(
@@ -308,14 +337,13 @@ class AIFundManagerTask(commands.Cog):
                 paper_bought=[],
                 is_real_active=is_real_active,
                 is_paper_active=is_paper_active,
-                trade_style=trade_style,
+                engine_mode=engine_mode,
                 ai_max_coins=user.ai_max_coins,
                 real_position_count=len(real_running),
                 paper_position_count=len(paper_running),
             )
             await self._send_dm_embed(user_id, embed)
 
-            # 실전 AI 포지션이 전부 청산되었는지 DB로 재확인 후 자동 비활성화
             if is_real_active:
                 async with AsyncSessionLocal() as db:
                     remaining_result = await db.execute(
@@ -351,97 +379,177 @@ class AIFundManagerTask(commands.Cog):
                     await self._send_dm_embed(user_id, completion_embed)
             return
 
-        # ── Step 3: 시장 분석 1회 (실전·모의 공유) ───────────────────
+        # ── 슬롯·공통 상태 계산 ──────────────────────────────────────
         real_slots  = (user.ai_max_coins - len(real_running))  if is_real_active  else 0
         paper_slots = (user.ai_max_coins - len(paper_running)) if is_paper_active else 0
-
-        # ── 실전 가용 예산 계산 (업비트 잔고 + AI 예산 한도 연동) ──────
-        # ai_budget_krw > 0  → 예산 모드: min(실제 KRW 잔고, 예산 - 기투자금액)
-        # ai_budget_krw == 0 → 기존 방식: 1회 매수 금액 × 빈 슬롯 수 (하위 호환)
-        if is_real_active and real_slots > 0 and exchange is not None:
-            budget = float(getattr(user, "ai_budget_krw", 0))
-            if budget > 0:
-                try:
-                    actual_krw = await exchange.fetch_krw_balance()
-                except Exception as exc:
-                    logger.warning(
-                        "KRW 잔고 조회 실패, 실전 매수 스킵: user_id=%s err=%s", user_id, exc
-                    )
-                    actual_krw = 0.0
-                total_invested = sum(float(s.buy_amount_krw) for s in real_running)
-                budget_remaining = max(0.0, budget - total_invested)
-                real_available_krw = min(actual_krw, budget_remaining)
-                logger.info(
-                    "AI 예산 계산: user_id=%s budget=%.0f invested=%.0f "
-                    "remaining=%.0f krw=%.0f → available=%.0f",
-                    user_id, budget, total_invested,
-                    budget_remaining, actual_krw, real_available_krw,
-                )
-            else:
-                # 예산 미설정: 기존 방식 (1회 매수 금액 × 빈 슬롯)
-                real_available_krw = float(user.ai_trade_amount) * real_slots
-        else:
-            real_available_krw = 0.0
-
-        paper_available_krw = float(user.virtual_krw)                          if is_paper_active else 0.0
-        ai_context_krw      = max(real_available_krw, paper_available_krw)
-
         holding_symbols: set[str] = {s.symbol for s in real_running + paper_running}
 
-        analysis = await self.ai_service.analyze_market(
-            market_data, holding_symbols, trade_style=trade_style,
-            available_krw=ai_context_krw,
-        )
-        market_summary = analysis.get("market_summary", "")
-        picks: list[dict] = analysis.get("picks", [])
+        # ── 실전 KRW 잔고 조회 (엔진별 예산 계산에 1회만 사용) ──────
+        actual_krw = 0.0
+        if is_real_active and exchange is not None:
+            try:
+                actual_krw = await exchange.fetch_krw_balance()
+            except Exception as exc:
+                logger.warning(
+                    "KRW 잔고 조회 실패: user_id=%s err=%s", user_id, exc
+                )
 
-        # ── Step 4: 실전 신규 매수 사이클 ────────────────────────────
-        if is_real_active and real_slots > 0 and picks:
-            await self._buy_new_coins(
-                user=user,
-                picks=picks,
-                exchange=exchange,
-                ws_manager=ws_manager,
-                registry=registry,
-                bought_positions=real_bought,
-                market_data=market_data,
-                is_paper_mode=False,
-                available_krw=real_available_krw,
-                max_slots=real_slots,
-                trade_style=trade_style,
+        # ── Step 3-a: SWING 엔진 분석·매수 ───────────────────────────
+        if run_swing:
+            swing_invested = sum(
+                float(s.buy_amount_krw) for s in real_running
+                if (s.trade_style or "").upper() in ("SWING", "SNIPER")
             )
-        elif is_real_active and real_slots <= 0:
+            swing_remaining       = max(0.0, swing_budget - swing_invested)
+            swing_real_available  = min(actual_krw, swing_remaining) if is_real_active else 0.0
+            swing_paper_available = float(user.virtual_krw) if is_paper_active else 0.0
+
             logger.info(
-                "최대 보유 종목 도달로 실전 신규 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
-                len(real_running), user.ai_max_coins, user_id,
+                "AI SWING 예산: user_id=%s budget=%.0f invested=%.0f "
+                "remaining=%.0f krw=%.0f → available=%.0f",
+                user_id, swing_budget, swing_invested,
+                swing_remaining, actual_krw, swing_real_available,
             )
-        elif is_real_active:
-            logger.info("실전 AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-        # ── Step 5: 모의 신규 매수 사이클 ────────────────────────────
-        if is_paper_active and paper_slots > 0 and picks:
-            await self._buy_new_coins(
-                user=user,
-                picks=picks,
-                exchange=None,
-                ws_manager=ws_manager,
-                registry=registry,
-                bought_positions=paper_bought,
-                market_data=market_data,
-                is_paper_mode=True,
-                available_krw=paper_available_krw,
-                max_slots=paper_slots,
-                trade_style=trade_style,
+            swing_analysis = await self.ai_service.analyze_market(
+                market_data,
+                holding_symbols,
+                engine_type="SWING",
+                weight_pct=swing_weight,
+                available_krw=max(swing_real_available, swing_paper_available),
             )
-        elif is_paper_active and paper_slots <= 0:
+            if swing_analysis.get("market_summary"):
+                market_summaries.append(
+                    f"📊 **스윙 엔진**\n{swing_analysis['market_summary']}"
+                )
+            swing_picks: list[dict] = swing_analysis.get("picks", [])
+
+            if is_real_active and real_slots > 0 and swing_picks:
+                await self._buy_new_coins(
+                    user=user,
+                    picks=swing_picks,
+                    exchange=exchange,
+                    ws_manager=ws_manager,
+                    registry=registry,
+                    bought_positions=real_bought,
+                    market_data=market_data,
+                    is_paper_mode=False,
+                    available_krw=swing_real_available,
+                    max_slots=real_slots,
+                    engine_type="SWING",
+                )
+            elif is_real_active and real_slots <= 0:
+                logger.info(
+                    "최대 보유 종목 도달로 실전 SWING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
+                    len(real_running), user.ai_max_coins, user_id,
+                )
+            elif is_real_active:
+                logger.info("실전 SWING AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+            if is_paper_active and paper_slots > 0 and swing_picks:
+                await self._buy_new_coins(
+                    user=user,
+                    picks=swing_picks,
+                    exchange=None,
+                    ws_manager=ws_manager,
+                    registry=registry,
+                    bought_positions=paper_bought,
+                    market_data=market_data,
+                    is_paper_mode=True,
+                    available_krw=swing_paper_available,
+                    max_slots=paper_slots,
+                    engine_type="SWING",
+                )
+            elif is_paper_active and paper_slots <= 0:
+                logger.info(
+                    "[모의] 최대 보유 종목 도달로 SWING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
+                    len(paper_running), user.ai_max_coins, user_id,
+                )
+            elif is_paper_active:
+                logger.info("모의 SWING AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+            # BOTH 모드: 스윙 매수 후 슬롯·보유 집합 업데이트 (스캘핑 중복 방지)
+            if engine_mode == "BOTH":
+                real_slots  -= sum(1 for b in real_bought  if b.get("engine_type") == "SWING")
+                paper_slots -= sum(1 for b in paper_bought if b.get("engine_type") == "SWING")
+                holding_symbols |= {b["symbol"] for b in real_bought + paper_bought}
+
+        # ── Step 3-b: SCALPING 엔진 분석·매수 ────────────────────────
+        if run_scalp:
+            scalp_invested = sum(
+                float(s.buy_amount_krw) for s in real_running
+                if (s.trade_style or "").upper() in ("SCALPING", "BEAST")
+            )
+            scalp_remaining       = max(0.0, scalp_budget - scalp_invested)
+            scalp_real_available  = min(actual_krw, scalp_remaining) if is_real_active else 0.0
+            scalp_paper_available = float(user.virtual_krw) if is_paper_active else 0.0
+
             logger.info(
-                "[모의] 최대 보유 종목 도달로 신규 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
-                len(paper_running), user.ai_max_coins, user_id,
+                "AI SCALPING 예산: user_id=%s budget=%.0f invested=%.0f "
+                "remaining=%.0f krw=%.0f → available=%.0f",
+                user_id, scalp_budget, scalp_invested,
+                scalp_remaining, actual_krw, scalp_real_available,
             )
-        elif is_paper_active:
-            logger.info("모의 AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-        # ── Step 6: 통합 DM Embed 발송 ───────────────────────────────
+            scalp_analysis = await self.ai_service.analyze_market(
+                market_data,
+                holding_symbols,
+                engine_type="SCALPING",
+                weight_pct=scalp_weight,
+                available_krw=max(scalp_real_available, scalp_paper_available),
+            )
+            if scalp_analysis.get("market_summary"):
+                market_summaries.append(
+                    f"⚡ **스캘핑 엔진**\n{scalp_analysis['market_summary']}"
+                )
+            scalp_picks: list[dict] = scalp_analysis.get("picks", [])
+
+            if is_real_active and real_slots > 0 and scalp_picks:
+                await self._buy_new_coins(
+                    user=user,
+                    picks=scalp_picks,
+                    exchange=exchange,
+                    ws_manager=ws_manager,
+                    registry=registry,
+                    bought_positions=real_bought,
+                    market_data=market_data,
+                    is_paper_mode=False,
+                    available_krw=scalp_real_available,
+                    max_slots=real_slots,
+                    engine_type="SCALPING",
+                )
+            elif is_real_active and real_slots <= 0:
+                logger.info(
+                    "최대 보유 종목 도달로 실전 SCALPING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
+                    len(real_running), user.ai_max_coins, user_id,
+                )
+            elif is_real_active:
+                logger.info("실전 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+            if is_paper_active and paper_slots > 0 and scalp_picks:
+                await self._buy_new_coins(
+                    user=user,
+                    picks=scalp_picks,
+                    exchange=None,
+                    ws_manager=ws_manager,
+                    registry=registry,
+                    bought_positions=paper_bought,
+                    market_data=market_data,
+                    is_paper_mode=True,
+                    available_krw=scalp_paper_available,
+                    max_slots=paper_slots,
+                    engine_type="SCALPING",
+                )
+            elif is_paper_active and paper_slots <= 0:
+                logger.info(
+                    "[모의] 최대 보유 종목 도달로 SCALPING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
+                    len(paper_running), user.ai_max_coins, user_id,
+                )
+            elif is_paper_active:
+                logger.info("모의 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+        # ── Step 4: 통합 DM Embed 발송 ───────────────────────────────
+        market_summary = "\n\n".join(market_summaries) if market_summaries else ""
         embed = self._build_unified_report_embed(
             market_summary=market_summary,
             real_reviewed=real_reviewed,
@@ -450,9 +558,8 @@ class AIFundManagerTask(commands.Cog):
             paper_bought=paper_bought,
             is_real_active=is_real_active,
             is_paper_active=is_paper_active,
-            trade_style=trade_style,
+            engine_mode=engine_mode,
             ai_max_coins=user.ai_max_coins,
-            # 이번 사이클 후 최종 보유 종목 수 = 기존 실행 중 + 이번에 신규 매수된 종목
             real_position_count=len(real_running) + len(real_bought),
             paper_position_count=len(paper_running) + len(paper_bought),
         )
@@ -470,7 +577,7 @@ class AIFundManagerTask(commands.Cog):
         ws_manager: UpbitWebsocketManager,
         registry: WorkerRegistry,
         reviewed_positions: list[dict],
-        trade_style: str = "SWING",
+        engine_type: str = "SWING",
     ) -> None:
         """보유 포지션을 AI로 리뷰해 UPDATE 시 DB·워커 인메모리를 동기화한다.
 
@@ -483,7 +590,7 @@ class AIFundManagerTask(commands.Cog):
             ws_manager:         UpbitWebsocketManager 인스턴스.
             registry:           WorkerRegistry 인스턴스.
             reviewed_positions: 결과를 축적할 리스트 (DM 리포트용).
-            trade_style:        "SWING" 또는 "SCALPING" — 사용할 지표 타임프레임 결정.
+            engine_type:        "SWING" 또는 "SCALPING" — 사용할 지표 타임프레임 결정.
         """
         positions_data: list[dict] = []
         for s in running_settings:
@@ -514,7 +621,7 @@ class AIFundManagerTask(commands.Cog):
             return
 
         reviews = await self.ai_service.review_positions(
-            positions_data, market_data, trade_style=trade_style,
+            positions_data, market_data, engine_type=engine_type,
         )
         if not reviews:
             logger.info("AI 포지션 리뷰 결과 없음: user_id=%s", user_id)
@@ -607,7 +714,7 @@ class AIFundManagerTask(commands.Cog):
         is_paper_mode: bool = False,
         available_krw: float = 0.0,
         max_slots: int = 0,
-        trade_style: str = "SWING",
+        engine_type: str = "SWING",
     ) -> None:
         """AI가 선정한 신규 종목을 매수(실거래) 또는 가상 체결(모의투자)하고 워커를 등록한다.
 
@@ -637,6 +744,7 @@ class AIFundManagerTask(commands.Cog):
             is_paper_mode:    True = 모의투자 / False = 실거래.
             available_krw:    이번 사이클 가용 예산 (비중 기반 매수금액 산출 기준).
             max_slots:        이번 사이클 최대 신규 매수 가능 슬롯 수.
+            engine_type:      "SWING" 또는 "SCALPING" — BotSetting.trade_style 에 저장됨.
         """
         user_id = user.user_id
 
@@ -813,7 +921,7 @@ class AIFundManagerTask(commands.Cog):
                         amount_coin=amount_coin,
                         is_paper_trading=is_paper_mode,   # ← 모의/실전 격리 플래그
                         is_ai_managed=True,                # ← 수동 봇과의 격리 플래그
-                        trade_style=trade_style,           # ← AI 메타데이터
+                        trade_style=engine_type,           # ← AI 메타데이터 (SWING/SCALPING)
                         ai_score=score,
                         ai_reason=pick.get("reason"),
                     )
@@ -847,6 +955,7 @@ class AIFundManagerTask(commands.Cog):
                         "score":             score,
                         "weight_pct":        weight_pct,
                         "trade_amount":      safe_trade_amount,
+                        "engine_type":       engine_type,   # BOTH 모드 슬롯 추적용
                     }
                 )
                 slots_used += 1
@@ -878,7 +987,7 @@ class AIFundManagerTask(commands.Cog):
         paper_bought: list[dict],
         is_real_active: bool,
         is_paper_active: bool,
-        trade_style: str = "SWING",
+        engine_mode: str = "SWING",
         ai_max_coins: int = 3,
         real_position_count: int = 0,
         paper_position_count: int = 0,
@@ -897,7 +1006,7 @@ class AIFundManagerTask(commands.Cog):
             paper_bought:          모의 신규 매수 결과 리스트.
             is_real_active:        이번 사이클에서 실전 모드가 활성 상태였는지.
             is_paper_active:       이번 사이클에서 모의 모드가 활성 상태였는지.
-            trade_style:           "SWING" 또는 "SCALPING" — 제목/푸터에 표시.
+            engine_mode:           "SWING" / "SCALPING" / "BOTH" — 제목/푸터에 표시.
             ai_max_coins:          유저 설정 최대 동시 보유 종목 수.
             real_position_count:   이번 사이클 후 실전 보유 종목 수 (기존 + 신규).
             paper_position_count:  이번 사이클 후 모의 보유 종목 수 (기존 + 신규).
@@ -909,8 +1018,13 @@ class AIFundManagerTask(commands.Cog):
         total_paper = len(paper_reviewed) + len(paper_bought)
         total       = total_real + total_paper
 
-        # ── 투자 성향 레이블 ──────────────────────────────────────────
-        style_label = "⚡ 단타 (1h 봉)" if trade_style == "SCALPING" else "⚔️ 듀얼 스윙 (4h 봉)"
+        # ── 엔진 모드 레이블 ──────────────────────────────────────────
+        if engine_mode == "SCALPING":
+            style_label = "⚡ 스캘핑 (1h 봉)"
+        elif engine_mode == "BOTH":
+            style_label = "🔥 동시 가동 (스윙+스캘핑)"
+        else:
+            style_label = "📊 듀얼 스윙 (4h 봉)"
 
         # ── 컬러·제목 결정 ────────────────────────────────────────────
         color = discord.Color.blue() if total > 0 else discord.Color.greyple()
@@ -1153,7 +1267,8 @@ class AIFundManagerTask(commands.Cog):
                 )
 
         # ── 푸터: 다음 실행 시각 (투자 성향 반영) ────────────────────
-        next_time = get_next_run_time_for_style(trade_style)
+        _style_for_next = "SCALPING" if engine_mode in ("SCALPING", "BOTH") else "SWING"
+        next_time = get_next_run_time_for_style(_style_for_next)
         footer_parts: list[str] = []
         if is_real_active:  footer_parts.append("실전")
         if is_paper_active: footer_parts.append("🎮모의")

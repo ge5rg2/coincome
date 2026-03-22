@@ -110,6 +110,21 @@ class User(Base):
     ai_budget_krw: Mapped[float] = mapped_column(Float, default=0.0)
     ai_is_shutting_down: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # ── AI V2: 모듈형 엔진 선택 + 엔진별 독립 예산·비중 ─────────────────
+    # ai_engine_mode     : 가동 엔진 선택
+    #   "SWING"   — 📊 4h 듀얼 스윙 전용 (01·05·09·13·17·21시 KST 실행)
+    #   "SCALPING"— ⚡ 1h 스캘핑 전용   (매시 정각 실행)
+    #   "BOTH"    — 🔥 동시 가동        (두 엔진 독립 실행, 예산·비중 각각 설정)
+    # ai_swing_budget_krw  : 스윙 엔진 운용 예산 한도 (KRW, 1,000,000 ~ 100,000,000)
+    # ai_swing_weight_pct  : 스윙 1회 진입 비중 (10 ~ 100%)
+    # ai_scalp_budget_krw  : 스캘핑 엔진 운용 예산 한도 (KRW, 1,000,000 ~ 100,000,000)
+    # ai_scalp_weight_pct  : 스캘핑 1회 진입 비중 (10 ~ 100%)
+    ai_engine_mode: Mapped[str] = mapped_column(String(10), default="SWING")
+    ai_swing_budget_krw: Mapped[int] = mapped_column(Integer, default=1_000_000)
+    ai_swing_weight_pct: Mapped[int] = mapped_column(Integer, default=20)
+    ai_scalp_budget_krw: Mapped[int] = mapped_column(Integer, default=1_000_000)
+    ai_scalp_weight_pct: Mapped[int] = mapped_column(Integer, default=20)
+
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")
     trade_histories: Mapped[list["TradeHistory"]] = relationship(
