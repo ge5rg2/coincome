@@ -26,6 +26,7 @@ from sqlalchemy import select
 from app.database import AsyncSessionLocal
 from app.models.bot_setting import BotSetting
 from app.models.user import SubscriptionTier, User
+from app.services.exchange import ExchangeService
 from app.services.trading_worker import WorkerRegistry
 from app.utils.time import get_next_run_time_for_style
 
@@ -158,9 +159,32 @@ class AISettingView(discord.ui.View):
     async def next_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        """선택된 엔진에 맞는 Modal을 표시한다."""
+        """선택된 엔진에 맞는 Modal을 표시한다. OFF 선택 시 즉시 DB 저장 후 종료."""
         user = self._user
         engine = self.engine_value
+
+        # ── OFF 패스트트랙: Modal 없이 즉시 비활성화 ─────────────────
+        if self.mode_value == "OFF":
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(select(User).where(User.user_id == user.user_id))
+                db_user = result.scalar_one_or_none()
+                if db_user:
+                    db_user.ai_mode_enabled = False
+                    await db.commit()
+            logger.info("AI 실전 자동매매 비활성화: user_id=%s", user.user_id)
+            # 현재 엔진의 예산으로 표시용 total 계산
+            if engine == "BOTH":
+                _total = int(
+                    (getattr(user, "ai_swing_budget_krw", 1_000_000) or 1_000_000)
+                    + (getattr(user, "ai_scalp_budget_krw", 1_000_000) or 1_000_000)
+                )
+            elif engine == "SCALPING":
+                _total = int(getattr(user, "ai_scalp_budget_krw", 1_000_000) or 1_000_000)
+            else:
+                _total = int(getattr(user, "ai_swing_budget_krw", 1_000_000) or 1_000_000)
+            embed = _make_disabled_embed(user.ai_max_coins, _total)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
 
         if engine == "SWING":
             modal = SwingSettingsModal(
@@ -309,6 +333,28 @@ class SwingSettingsModal(discord.ui.Modal, title="📊 4h 듀얼 스윙 설정")
                 await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
                 return
 
+            # ── 업비트 실제 잔고 검증 (하드가드) ─────────────────────
+            actual_krw: float | None = None
+            try:
+                if user.upbit_access_key and user.upbit_secret_key:
+                    _ex = ExchangeService(
+                        access_key=user.upbit_access_key,
+                        secret_key=user.upbit_secret_key,
+                    )
+                    actual_krw = await _ex.fetch_krw_balance()
+            except Exception as exc:
+                logger.warning(
+                    "KRW 잔고 조회 실패 (검증 스킵): user_id=%s err=%s", self._user_id, exc
+                )
+            if actual_krw is not None and budget > actual_krw:
+                await interaction.followup.send(
+                    f"❌ 설정한 운용 예산(**{budget:,}원**)이 실제 업비트 가용 잔고"
+                    f"(**{actual_krw:,.0f}원**)보다 큽니다.\n"
+                    "예산을 낮추거나 업비트 계좌에 입금해 주세요.",
+                    ephemeral=True,
+                )
+                return
+
             user.ai_mode_enabled = enabled
             user.ai_engine_mode = "SWING"
             user.ai_swing_budget_krw = budget
@@ -430,6 +476,28 @@ class ScalpSettingsModal(discord.ui.Modal, title="⚡ 1h 스캘핑 설정"):
             user = result.scalar_one_or_none()
             if user is None:
                 await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+            # ── 업비트 실제 잔고 검증 (하드가드) ─────────────────────
+            actual_krw: float | None = None
+            try:
+                if user.upbit_access_key and user.upbit_secret_key:
+                    _ex = ExchangeService(
+                        access_key=user.upbit_access_key,
+                        secret_key=user.upbit_secret_key,
+                    )
+                    actual_krw = await _ex.fetch_krw_balance()
+            except Exception as exc:
+                logger.warning(
+                    "KRW 잔고 조회 실패 (검증 스킵): user_id=%s err=%s", self._user_id, exc
+                )
+            if actual_krw is not None and budget > actual_krw:
+                await interaction.followup.send(
+                    f"❌ 설정한 운용 예산(**{budget:,}원**)이 실제 업비트 가용 잔고"
+                    f"(**{actual_krw:,.0f}원**)보다 큽니다.\n"
+                    "예산을 낮추거나 업비트 계좌에 입금해 주세요.",
+                    ephemeral=True,
+                )
                 return
 
             user.ai_mode_enabled = enabled
@@ -579,12 +647,35 @@ class BothSettingsModal(discord.ui.Modal, title="🔥 동시 가동 (스윙 + �
         enabled = self._mode == "ON"
         swing_trade_amount = max(5_000, int(swing_budget * swing_weight / 100))
         scalp_trade_amount = max(5_000, int(scalp_budget * scalp_weight / 100))
+        total_budget = swing_budget + scalp_budget
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == self._user_id))
             user = result.scalar_one_or_none()
             if user is None:
                 await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+            # ── 업비트 실제 잔고 검증 (하드가드, 두 엔진 예산 합산) ───
+            actual_krw: float | None = None
+            try:
+                if user.upbit_access_key and user.upbit_secret_key:
+                    _ex = ExchangeService(
+                        access_key=user.upbit_access_key,
+                        secret_key=user.upbit_secret_key,
+                    )
+                    actual_krw = await _ex.fetch_krw_balance()
+            except Exception as exc:
+                logger.warning(
+                    "KRW 잔고 조회 실패 (검증 스킵): user_id=%s err=%s", self._user_id, exc
+                )
+            if actual_krw is not None and total_budget > actual_krw:
+                await interaction.followup.send(
+                    f"❌ 설정한 운용 예산(**{total_budget:,}원** = 스윙 {swing_budget:,} + 스캘핑 {scalp_budget:,})이\n"
+                    f"실제 업비트 가용 잔고(**{actual_krw:,.0f}원**)보다 큽니다.\n"
+                    "예산을 낮추거나 업비트 계좌에 입금해 주세요.",
+                    ephemeral=True,
+                )
                 return
 
             user.ai_mode_enabled = enabled
