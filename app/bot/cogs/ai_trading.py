@@ -1,16 +1,18 @@
 """
-/ai실전 슬래시 커맨드: VIP 전용 AI 실전 자동 매매 펀드 매니저 기능 설정.
+/ai실전 슬래시 커맨드: VIP 전용 AI 실전 자동 매매 펀드 매니저 기능 설정 (V2).
 
 처리 흐름 (2단계 UI):
   [Step 1] VIP 등급 검증 → 미달 시 업그레이드 유도 Embed 반환
-  [Step 2] VIP 확인 → AISettingView 표시 (드롭다운: AI모드·투자성향)
-  [Step 3] "다음 →" 버튼 클릭 → AIAmountModal 표시 (숫자 입력: 금액·종목수)
+  [Step 2] VIP 확인 → AISettingView 표시 (AI 모드 ON/OFF, 엔진 선택 드롭다운)
+  [Step 3] "다음 →" 버튼 클릭 → 엔진에 따라 다른 Modal(팝업창) 표시
+           SWING    → SwingSettingsModal   (스윙 예산·비중·최대종목)
+           SCALPING → ScalpSettingsModal   (스캘핑 예산·비중·최대종목)
+           BOTH     → BothSettingsModal    (4가지 + 최대종목)
   [Step 4] 유저 제출 → DB 업데이트 → 완료 Embed 반환
 
 Discord API 제약:
-  Modal 내부에는 TextInput 만 허용 (Select 불가).
-  드롭다운 선택지(ON/OFF, SNIPER/BEAST)는 Step 2 View 단계에서 처리하고,
-  선택된 값을 Step 3 Modal 생성자에 전달한다.
+  Modal 내부에는 TextInput 만 허용 (Select 불가, 최대 5개).
+  BOTH 모드는 4개 예산/비중 필드 + 최대종목 = 5개로 정확히 부합.
 """
 from __future__ import annotations
 
@@ -47,9 +49,10 @@ def _make_vip_required_embed() -> discord.Embed:
     embed.add_field(
         name="🤖 VIP AI 펀드 매니저 기능",
         value=(
-            "• 4시간마다 전체 KRW 마켓 자동 스크리닝\n"
-            "• Claude Sonnet 듀얼 전략 엔진 (추세 돌파 + 낙폭 반등 자동 전환)\n"
-            "• 최대 N개 종목 자동 매수 및 워커 자동 등록\n"
+            "• **📊 4h 듀얼 스윙** — 추세 돌파 + 낙폭 반등 자동 전환 (6회/일)\n"
+            "• **⚡ 1h 스캘핑** — 단기 모멘텀 포착 (24회/일)\n"
+            "• **🔥 동시 가동** — 두 엔진 독립 운용, 예산·비중 각각 설정\n"
+            "• 엔진별 운용 예산 및 1회 진입 비중 자유 설정\n"
             "• 매수 후 DM 리포트 자동 발송"
         ),
         inline=False,
@@ -90,34 +93,39 @@ class ModeSelect(discord.ui.Select):
         await interaction.response.defer()
 
 
-class StyleSelect(discord.ui.Select):
-    """투자 비중 모드(SNIPER / BEAST) 드롭다운.
+class EngineSelect(discord.ui.Select):
+    """가동 엔진 선택 드롭다운 (SWING / SCALPING / BOTH).
 
-    v7 알트코인 전략 기준:
-      SNIPER — 시드 20% 투입 (안전 모드)
-      BEAST  — 시드 70% 투입 (공격 모드)
-    두 모드 모두 동일한 v7 4h 엔진을 사용한다.
+    V2에서 기존 SNIPER/BEAST 드롭다운을 완전 대체한다.
+    두 엔진 모두 동일한 듀얼 전략(전략A 추세돌파 + 전략B 낙폭반등)을 사용하며,
+    타임프레임·예산·비중만 달라진다.
     """
 
-    def __init__(self, current_style: str) -> None:
+    def __init__(self, current_engine: str) -> None:
         options = [
             discord.SelectOption(
-                label="🛡️ SNIPER — 시드 20% 안전 모드",
-                value="SNIPER",
-                description="듀얼 전략 자동 전환 | 알트코인 집중 | 안정 우상향",
-                default=current_style in ("SNIPER", "SWING"),
+                label="📊 4h 듀얼 스윙",
+                value="SWING",
+                description="추세 돌파 + 낙폭 반등 자동 전환 | 01·05·09·13·17·21시 실행",
+                default=current_engine == "SWING",
             ),
             discord.SelectOption(
-                label="🔥 BEAST — 시드 70% 공격 모드",
-                value="BEAST",
-                description="듀얼 전략 자동 전환 | 고비중 투입 | 하이리스크 하이리턴",
-                default=current_style in ("BEAST", "SCALPING"),
+                label="⚡ 1h 스캘핑",
+                value="SCALPING",
+                description="단기 모멘텀 포착 | TP 2% / SL 1.5% | 매시 정각 실행",
+                default=current_engine == "SCALPING",
+            ),
+            discord.SelectOption(
+                label="🔥 동시 가동 (모드 1+2)",
+                value="BOTH",
+                description="두 엔진 독립 운용 | 예산·비중 각각 설정 가능",
+                default=current_engine == "BOTH",
             ),
         ]
-        super().__init__(placeholder="투자 비중 모드를 선택하세요", options=options, row=1)
+        super().__init__(placeholder="가동 엔진을 선택하세요", options=options, row=1)
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        self.view.style_value = self.values[0]
+        self.view.engine_value = self.values[0]
         await interaction.response.defer()
 
 
@@ -126,73 +134,142 @@ class StyleSelect(discord.ui.Select):
 # ------------------------------------------------------------------
 
 class AISettingView(discord.ui.View):
-    """1단계: AI 모드·투자 성향을 드롭다운으로 선택하는 View.
+    """1단계: AI 모드·엔진을 드롭다운으로 선택하는 View.
 
-    "다음 →" 버튼 클릭 시 선택된 값을 AIAmountModal(2단계)에 전달한다.
+    "다음 →" 버튼 클릭 시 선택된 엔진에 맞는 Modal(2단계)을 표시한다.
     timeout=180 초 (이후 버튼 비활성화).
 
     Attributes:
-        mode_value:  현재 선택된 AI 모드 ("ON" / "OFF").
-        style_value: 현재 선택된 투자 비중 모드 ("SNIPER" / "BEAST").
+        mode_value:   현재 선택된 AI 모드 ("ON" / "OFF").
+        engine_value: 현재 선택된 엔진 ("SWING" / "SCALPING" / "BOTH").
     """
 
     def __init__(self, user: User) -> None:
         super().__init__(timeout=180)
         self._user = user
-        # Select 콜백이 업데이트할 인스턴스 변수 (초기값 = 기존 DB 설정)
+        current_engine = getattr(user, "ai_engine_mode", None) or "SWING"
         self.mode_value: str = "ON" if user.ai_mode_enabled else "OFF"
-        self.style_value: str = getattr(user, "ai_trade_style", "SNIPER")
+        self.engine_value: str = current_engine
 
         self.add_item(ModeSelect(current_enabled=user.ai_mode_enabled))
-        self.add_item(StyleSelect(current_style=self.style_value))
+        self.add_item(EngineSelect(current_engine=current_engine))
 
     @discord.ui.button(label="다음 →", style=discord.ButtonStyle.primary, emoji="⚙️", row=2)
     async def next_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        """선택된 모드·성향을 AIAmountModal 에 넘겨 Modal 을 표시한다."""
-        modal = AIAmountModal(
-            user_id=self._user.user_id,
-            mode=self.mode_value,
-            style=self.style_value,
-            current_max_coins=self._user.ai_max_coins,
-            current_budget=int(getattr(self._user, "ai_budget_krw", 0)),
-        )
+        """선택된 엔진에 맞는 Modal을 표시한다."""
+        user = self._user
+        engine = self.engine_value
+
+        if engine == "SWING":
+            modal = SwingSettingsModal(
+                user_id=user.user_id,
+                mode=self.mode_value,
+                current_budget=int(getattr(user, "ai_swing_budget_krw", 1_000_000) or 1_000_000),
+                current_weight=int(getattr(user, "ai_swing_weight_pct", 20) or 20),
+                current_max_coins=user.ai_max_coins,
+            )
+        elif engine == "SCALPING":
+            modal = ScalpSettingsModal(
+                user_id=user.user_id,
+                mode=self.mode_value,
+                current_budget=int(getattr(user, "ai_scalp_budget_krw", 1_000_000) or 1_000_000),
+                current_weight=int(getattr(user, "ai_scalp_weight_pct", 20) or 20),
+                current_max_coins=user.ai_max_coins,
+            )
+        else:  # BOTH
+            modal = BothSettingsModal(
+                user_id=user.user_id,
+                mode=self.mode_value,
+                current_swing_budget=int(getattr(user, "ai_swing_budget_krw", 1_000_000) or 1_000_000),
+                current_swing_weight=int(getattr(user, "ai_swing_weight_pct", 20) or 20),
+                current_scalp_budget=int(getattr(user, "ai_scalp_budget_krw", 1_000_000) or 1_000_000),
+                current_scalp_weight=int(getattr(user, "ai_scalp_weight_pct", 20) or 20),
+                current_max_coins=user.ai_max_coins,
+            )
+
         await interaction.response.send_modal(modal)
 
 
 # ------------------------------------------------------------------
-# Step 2: Modal (숫자 입력 + DB 저장)
+# 공통 유효성 검사 헬퍼
 # ------------------------------------------------------------------
 
-class AIAmountModal(discord.ui.Modal, title="AI 실전 — 예산 설정"):
-    """2단계: 총 운용 예산·최대 종목 수를 입력받아 DB에 저장하는 Modal.
+def _validate_budget(raw: str) -> tuple[int | None, str | None]:
+    """예산 문자열을 파싱하고 범위를 검증한다.
 
-    Step 1 View에서 선택된 mode·style 값을 생성자로 받아 함께 저장한다.
-    1회 매수금액은 선택한 모드 비중(SNIPER=20%, BEAST=70%)에 따라
-    ``total_budget × weight_pct / 100`` 으로 파이썬 로직 내에서 자동 산정된다.
-
-    Args:
-        user_id:           Discord 사용자 ID.
-        mode:              "ON" 또는 "OFF" (Step 1 에서 선택).
-        style:             "SNIPER" 또는 "BEAST" (Step 1 에서 선택, 하위 호환: "SWING"/"SCALPING").
-        current_max_coins: 현재 DB 값 (pre-fill 용).
-        current_budget:    현재 DB 값 (pre-fill 용).
+    Returns:
+        (int 값, None) 또는 (None, 오류 메시지).
     """
+    try:
+        v = int(raw.replace(",", "").strip())
+    except ValueError:
+        return None, "❌ 예산은 숫자로 입력해 주세요."
+    if not 1_000_000 <= v <= 100_000_000:
+        return None, "❌ 예산은 **최소 1,000,000 ~ 최대 100,000,000 KRW** 사이로 입력해 주세요."
+    return v, None
+
+
+def _validate_weight(raw: str) -> tuple[int | None, str | None]:
+    """비중 문자열을 파싱하고 범위를 검증한다.
+
+    Returns:
+        (int 값, None) 또는 (None, 오류 메시지).
+    """
+    try:
+        v = int(raw.replace("%", "").strip())
+    except ValueError:
+        return None, "❌ 비중은 숫자(정수)로 입력해 주세요."
+    if not 10 <= v <= 100:
+        return None, "❌ 비중은 **10 ~ 100%** 사이로 입력해 주세요."
+    return v, None
+
+
+def _validate_max_coins(raw: str) -> tuple[int | None, str | None]:
+    """최대 종목 수 문자열을 파싱하고 범위를 검증한다."""
+    try:
+        v = int(raw.strip())
+    except ValueError:
+        return None, "❌ 최대 보유 종목 수는 숫자로 입력해 주세요."
+    if not 1 <= v <= 10:
+        return None, "❌ 최대 보유 종목 수는 **1 ~ 10** 사이로 입력해 주세요."
+    return v, None
+
+
+# ------------------------------------------------------------------
+# Step 2: SWING 전용 Modal
+# ------------------------------------------------------------------
+
+class SwingSettingsModal(discord.ui.Modal, title="📊 4h 듀얼 스윙 설정"):
+    """스윙 엔진 예산·비중·최대종목을 입력받아 DB에 저장하는 Modal."""
 
     def __init__(
         self,
         user_id: str,
         mode: str,
-        style: str,
+        current_budget: int,
+        current_weight: int,
         current_max_coins: int,
-        current_budget: int = 0,
     ) -> None:
         super().__init__()
         self._user_id = user_id
         self._mode = mode
-        self._style = style
 
+        self.budget = discord.ui.TextInput(
+            label="스윙 운용 예산 (KRW)",
+            placeholder="예: 3000000  |  최소 1,000,000 ~ 최대 100,000,000 원",
+            min_length=7,
+            max_length=12,
+            default=str(current_budget),
+        )
+        self.weight = discord.ui.TextInput(
+            label="스윙 1회 진입 비중 (%)",
+            placeholder="예: 20  |  20%는 안전 지향, 70% 이상은 공격적 성향입니다.",
+            min_length=2,
+            max_length=3,
+            default=str(current_weight),
+        )
         self.max_coins = discord.ui.TextInput(
             label="최대 동시 보유 종목 수",
             placeholder="예: 3  (1 ~ 10)",
@@ -200,153 +277,386 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 예산 설정"):
             max_length=2,
             default=str(current_max_coins),
         )
-        self.budget = discord.ui.TextInput(
-            label="총 운용 예산 (KRW)",
-            placeholder="예: 500000  (이 금액 기준으로 1회 매수금액 자동 산정)",
-            min_length=4,
-            max_length=12,
-            default=str(current_budget) if current_budget > 0 else "",
-        )
-        self.add_item(self.max_coins)
         self.add_item(self.budget)
+        self.add_item(self.weight)
+        self.add_item(self.max_coins)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True)
 
-        # ── 최대 종목 수 검증 ──────────────────────────────────────────
-        try:
-            max_coins = int(self.max_coins.value.strip())
-        except ValueError:
-            await interaction.followup.send(
-                "❌ 최대 보유 종목 수는 숫자로 입력해 주세요.", ephemeral=True
-            )
+        budget, err = _validate_budget(self.budget.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
             return
 
-        if not 1 <= max_coins <= 10:
-            await interaction.followup.send(
-                "❌ 최대 보유 종목 수는 **1 ~ 10** 사이로 입력해 주세요.", ephemeral=True
-            )
+        weight, err = _validate_weight(self.weight.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
             return
 
-        # ── 총 운용 예산 검증 ──────────────────────────────────────────
-        try:
-            budget_raw = (self.budget.value or "").replace(",", "").strip()
-            budget = int(budget_raw) if budget_raw else 0
-        except ValueError:
-            await interaction.followup.send(
-                "❌ 총 운용 예산은 숫자로 입력해 주세요.", ephemeral=True
-            )
+        max_coins, err = _validate_max_coins(self.max_coins.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
             return
-
-        if budget < 6_000:
-            await interaction.followup.send(
-                "❌ 총 운용 예산은 **최소 6,000 KRW** 이상이어야 합니다.\n"
-                "(업비트 최소 주문 한도 + 손절 하락분 고려)",
-                ephemeral=True,
-            )
-            return
-
-        # ── 모드 비중 기반 1회 매수금액 자동 산정 ────────────────────
-        # SNIPER(20%) / BEAST(70%) 비중에 따라 budget 의 일정 % 를 1회 매수에 사용
-        weight_pct = 20 if self._style in ("SNIPER", "SWING") else 70
-        trade_amount = max(6_000, int(budget * weight_pct / 100))
 
         enabled = self._mode == "ON"
+        trade_amount = max(5_000, int(budget * weight / 100))
 
-        # ── DB 업데이트 ───────────────────────────────────────────────
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == self._user_id))
             user = result.scalar_one_or_none()
             if user is None:
-                await interaction.followup.send(
-                    "❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True
-                )
+                await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
                 return
+
             user.ai_mode_enabled = enabled
-            # 1회 매수금액 = 예산 × 모드 비중 (자동 산정)
-            user.ai_trade_amount = trade_amount
+            user.ai_engine_mode = "SWING"
+            user.ai_swing_budget_krw = budget
+            user.ai_swing_weight_pct = weight
             user.ai_max_coins = max_coins
-            user.ai_trade_style = self._style
-            user.ai_budget_krw = float(budget)
-            user.ai_is_shutting_down = False  # 설정 변경 시 종료 모드 초기화
+            user.ai_trade_amount = trade_amount   # 하위 호환
+            user.ai_trade_style = "SWING"         # 하위 호환
+            user.ai_budget_krw = float(budget)    # 하위 호환
+            user.ai_is_shutting_down = False
             await db.commit()
 
         logger.info(
-            "AI 실전 설정 업데이트: user_id=%s enabled=%s "
-            "budget=%d weight=%d%% trade_amount=%d max_coins=%d style=%s",
-            self._user_id, enabled, budget, weight_pct, trade_amount, max_coins, self._style,
+            "AI 스윙 설정 업데이트: user_id=%s enabled=%s budget=%d weight=%d%% max_coins=%d",
+            self._user_id, enabled, budget, weight, max_coins,
         )
 
-        # ── 모드별 동적 Embed 생성 (SNIPER / BEAST 분기) ─────────────
-        budget_str = f"{budget:,} KRW"
-        trade_str  = f"{trade_amount:,} KRW (예산의 {weight_pct}% 자동 산정)"
-
         if not enabled:
-            # OFF 선택: 간단한 비활성화 확인 Embed
+            embed = _make_disabled_embed(max_coins, budget)
+        else:
+            next_time = get_next_run_time_for_style("SWING")
             embed = discord.Embed(
-                title="⏸️ AI 실전 자동 매매 비활성화",
-                description="신규 AI 매수가 중단됩니다. 기존 실행 중인 워커는 계속 동작합니다.",
-                color=discord.Color.greyple(),
-            )
-            embed.add_field(name="AI 모드", value="⏸️ 비활성화", inline=True)
-            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-            embed.add_field(name="총 운용 예산", value=budget_str, inline=True)
-            embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
-        elif self._style in ("SNIPER", "SWING"):
-            # SNIPER 모드 ON
-            embed = discord.Embed(
-                title="🛡️ 인텔리전트 스나이퍼 모드 가동",
+                title="📊 4h 듀얼 스윙 엔진 가동",
                 description=(
-                    "가용 시드의 **20%** 투입. "
-                    "MDD(최대 낙폭)를 최소화하며 안정적인 우상향을 추구하는 **안전 모드**입니다."
+                    "4시간 봉 기반 **듀얼 전략 엔진**이 활성화되었습니다.\n"
+                    "추세 돌파(전략A)와 낙폭과대 반등(전략B)을 시장 상황에 따라 자동 전환합니다."
                 ),
                 color=discord.Color.blue(),
             )
             embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
+            embed.add_field(name="가동 엔진", value="📊 4h 듀얼 스윙", inline=True)
             embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-            embed.add_field(name="총 운용 예산", value=budget_str, inline=True)
-            embed.add_field(name="💡 1회 매수금액 (자동)", value=trade_str, inline=False)
-            # ── 공통 전략 설명 필드 ───────────────────────────────────
             embed.add_field(
-                name="📋 전략",
+                name="💰 스윙 설정",
+                value=f"예산: **{budget:,} KRW**  |  1회 진입 비중: **{weight}%**\n"
+                      f"→ 1회 매수 기준금액: **{trade_amount:,} KRW**",
+                inline=False,
+            )
+            embed.add_field(
+                name="📋 전략 (듀얼 엔진 공통)",
                 value=(
                     "**전략A** 추세 돌파 (MA50 상승 + RSI 55~70) — 익절 **6.0%** / 손절 **4.0%** (R:R 1.5:1)\n"
                     "**전략B** 낙폭 반등 (MA50 하락 + RSI < 25) — 익절 **3.0%** / 손절 **2.5%** (R:R 1.2:1)\n"
-                    "BTC 상태에 따라 전략A/B 자동 전환 | 메이저 코인 거래 차단"
+                    "BTC 국면에 따라 전략A/B 자동 전환 | 메이저 코인 거래 차단"
                 ),
                 inline=False,
             )
-            next_time = get_next_run_time_for_style(self._style)
             embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | 01·05·09·13·17·21시 실행 (4h 봉 기준)")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ------------------------------------------------------------------
+# Step 2: SCALPING 전용 Modal
+# ------------------------------------------------------------------
+
+class ScalpSettingsModal(discord.ui.Modal, title="⚡ 1h 스캘핑 설정"):
+    """스캘핑 엔진 예산·비중·최대종목을 입력받아 DB에 저장하는 Modal."""
+
+    def __init__(
+        self,
+        user_id: str,
+        mode: str,
+        current_budget: int,
+        current_weight: int,
+        current_max_coins: int,
+    ) -> None:
+        super().__init__()
+        self._user_id = user_id
+        self._mode = mode
+
+        self.budget = discord.ui.TextInput(
+            label="스캘핑 운용 예산 (KRW)",
+            placeholder="예: 2000000  |  최소 1,000,000 ~ 최대 100,000,000 원",
+            min_length=7,
+            max_length=12,
+            default=str(current_budget),
+        )
+        self.weight = discord.ui.TextInput(
+            label="스캘핑 1회 진입 비중 (%)",
+            placeholder="예: 30  |  20%는 안전 지향, 70% 이상은 공격적 성향입니다.",
+            min_length=2,
+            max_length=3,
+            default=str(current_weight),
+        )
+        self.max_coins = discord.ui.TextInput(
+            label="최대 동시 보유 종목 수",
+            placeholder="예: 3  (1 ~ 10)",
+            min_length=1,
+            max_length=2,
+            default=str(current_max_coins),
+        )
+        self.add_item(self.budget)
+        self.add_item(self.weight)
+        self.add_item(self.max_coins)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        budget, err = _validate_budget(self.budget.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+
+        weight, err = _validate_weight(self.weight.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+
+        max_coins, err = _validate_max_coins(self.max_coins.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+
+        enabled = self._mode == "ON"
+        trade_amount = max(5_000, int(budget * weight / 100))
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.user_id == self._user_id))
+            user = result.scalar_one_or_none()
+            if user is None:
+                await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+            user.ai_mode_enabled = enabled
+            user.ai_engine_mode = "SCALPING"
+            user.ai_scalp_budget_krw = budget
+            user.ai_scalp_weight_pct = weight
+            user.ai_max_coins = max_coins
+            user.ai_trade_amount = trade_amount   # 하위 호환
+            user.ai_trade_style = "SCALPING"      # 하위 호환
+            user.ai_budget_krw = float(budget)    # 하위 호환
+            user.ai_is_shutting_down = False
+            await db.commit()
+
+        logger.info(
+            "AI 스캘핑 설정 업데이트: user_id=%s enabled=%s budget=%d weight=%d%% max_coins=%d",
+            self._user_id, enabled, budget, weight, max_coins,
+        )
+
+        if not enabled:
+            embed = _make_disabled_embed(max_coins, budget)
         else:
-            # BEAST / SCALPING 모드 ON (하위 호환)
+            next_time = get_next_run_time_for_style("SCALPING")
             embed = discord.Embed(
-                title="🔥 야수의 심장 모드 가동",
+                title="⚡ 1h 스캘핑 엔진 가동",
                 description=(
-                    "가용 시드의 **70%** 투입. "
-                    "리스크를 감수하고 폭발적인 수익을 노리는 "
-                    "**하이리스크 하이리턴 공격 모드**입니다."
+                    "1시간 봉 기반 **단기 모멘텀 포착** 엔진이 활성화되었습니다.\n"
+                    "Close > MA20 + RSI 60~75 진입 조건, 매시 정각 실행합니다."
+                ),
+                color=discord.Color.orange(),
+            )
+            embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
+            embed.add_field(name="가동 엔진", value="⚡ 1h 스캘핑", inline=True)
+            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
+            embed.add_field(
+                name="💰 스캘핑 설정",
+                value=f"예산: **{budget:,} KRW**  |  1회 진입 비중: **{weight}%**\n"
+                      f"→ 1회 매수 기준금액: **{trade_amount:,} KRW**",
+                inline=False,
+            )
+            embed.add_field(
+                name="📋 스캘핑 전략",
+                value=(
+                    "진입: Close > MA20 AND RSI 60~75\n"
+                    "익절: **+2.0%** / 손절: **-1.5%** (R:R 1.33:1)\n"
+                    "메이저 코인 거래 차단 | 매시 정각 실행"
+                ),
+                inline=False,
+            )
+            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | 매시 정각 실행 (1h 봉 기준)")
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ------------------------------------------------------------------
+# Step 2: BOTH(동시 가동) Modal
+# ------------------------------------------------------------------
+
+class BothSettingsModal(discord.ui.Modal, title="🔥 동시 가동 (스윙 + 스캘핑) 설정"):
+    """두 엔진의 예산·비중·최대종목을 입력받아 DB에 저장하는 Modal.
+
+    Discord Modal 최대 5개 TextInput 제약에 맞게 구성.
+    """
+
+    def __init__(
+        self,
+        user_id: str,
+        mode: str,
+        current_swing_budget: int,
+        current_swing_weight: int,
+        current_scalp_budget: int,
+        current_scalp_weight: int,
+        current_max_coins: int,
+    ) -> None:
+        super().__init__()
+        self._user_id = user_id
+        self._mode = mode
+
+        self.swing_budget = discord.ui.TextInput(
+            label="📊 스윙 운용 예산 (KRW)",
+            placeholder="예: 3000000  |  최소 1,000,000 ~ 최대 100,000,000 원",
+            min_length=7,
+            max_length=12,
+            default=str(current_swing_budget),
+        )
+        self.swing_weight = discord.ui.TextInput(
+            label="📊 스윙 1회 진입 비중 (%)",
+            placeholder="예: 20  |  20%는 안전 지향, 70% 이상은 공격적 성향입니다.",
+            min_length=2,
+            max_length=3,
+            default=str(current_swing_weight),
+        )
+        self.scalp_budget = discord.ui.TextInput(
+            label="⚡ 스캘핑 운용 예산 (KRW)",
+            placeholder="예: 2000000  |  최소 1,000,000 ~ 최대 100,000,000 원",
+            min_length=7,
+            max_length=12,
+            default=str(current_scalp_budget),
+        )
+        self.scalp_weight = discord.ui.TextInput(
+            label="⚡ 스캘핑 1회 진입 비중 (%)",
+            placeholder="예: 30  |  20%는 안전 지향, 70% 이상은 공격적 성향입니다.",
+            min_length=2,
+            max_length=3,
+            default=str(current_scalp_weight),
+        )
+        self.max_coins = discord.ui.TextInput(
+            label="최대 동시 보유 종목 수 (엔진 합산)",
+            placeholder="예: 5  (1 ~ 10)",
+            min_length=1,
+            max_length=2,
+            default=str(current_max_coins),
+        )
+        self.add_item(self.swing_budget)
+        self.add_item(self.swing_weight)
+        self.add_item(self.scalp_budget)
+        self.add_item(self.scalp_weight)
+        self.add_item(self.max_coins)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        swing_budget, err = _validate_budget(self.swing_budget.value)
+        if err:
+            await interaction.followup.send(f"[스윙 예산] {err}", ephemeral=True)
+            return
+
+        swing_weight, err = _validate_weight(self.swing_weight.value)
+        if err:
+            await interaction.followup.send(f"[스윙 비중] {err}", ephemeral=True)
+            return
+
+        scalp_budget, err = _validate_budget(self.scalp_budget.value)
+        if err:
+            await interaction.followup.send(f"[스캘핑 예산] {err}", ephemeral=True)
+            return
+
+        scalp_weight, err = _validate_weight(self.scalp_weight.value)
+        if err:
+            await interaction.followup.send(f"[스캘핑 비중] {err}", ephemeral=True)
+            return
+
+        max_coins, err = _validate_max_coins(self.max_coins.value)
+        if err:
+            await interaction.followup.send(err, ephemeral=True)
+            return
+
+        enabled = self._mode == "ON"
+        swing_trade_amount = max(5_000, int(swing_budget * swing_weight / 100))
+        scalp_trade_amount = max(5_000, int(scalp_budget * scalp_weight / 100))
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.user_id == self._user_id))
+            user = result.scalar_one_or_none()
+            if user is None:
+                await interaction.followup.send("❌ 유저 정보를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+            user.ai_mode_enabled = enabled
+            user.ai_engine_mode = "BOTH"
+            user.ai_swing_budget_krw = swing_budget
+            user.ai_swing_weight_pct = swing_weight
+            user.ai_scalp_budget_krw = scalp_budget
+            user.ai_scalp_weight_pct = scalp_weight
+            user.ai_max_coins = max_coins
+            user.ai_trade_amount = swing_trade_amount  # 하위 호환 (스윙 기준)
+            user.ai_trade_style = "SWING"              # 하위 호환
+            user.ai_budget_krw = float(swing_budget + scalp_budget)  # 하위 호환 (합산)
+            user.ai_is_shutting_down = False
+            await db.commit()
+
+        logger.info(
+            "AI 동시 가동 설정 업데이트: user_id=%s enabled=%s "
+            "swing_budget=%d swing_weight=%d%% scalp_budget=%d scalp_weight=%d%% max_coins=%d",
+            self._user_id, enabled,
+            swing_budget, swing_weight, scalp_budget, scalp_weight, max_coins,
+        )
+
+        if not enabled:
+            embed = _make_disabled_embed(max_coins, swing_budget + scalp_budget)
+        else:
+            embed = discord.Embed(
+                title="🔥 동시 가동 모드 활성화",
+                description=(
+                    "**📊 4h 듀얼 스윙** + **⚡ 1h 스캘핑** 두 엔진이 **독립적으로** 가동됩니다.\n"
+                    "각 엔진의 예산과 비중이 분리되어 운용됩니다."
                 ),
                 color=discord.Color.red(),
             )
             embed.add_field(name="AI 모드", value="✅ 활성화", inline=True)
-            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
-            embed.add_field(name="총 운용 예산", value=budget_str, inline=True)
-            embed.add_field(name="💡 1회 매수금액 (자동)", value=trade_str, inline=False)
-            # ── 공통 전략 설명 필드 ───────────────────────────────────
+            embed.add_field(name="가동 엔진", value="🔥 동시 가동", inline=True)
+            embed.add_field(name="최대 보유 종목", value=f"{max_coins}개 (합산)", inline=True)
             embed.add_field(
-                name="📋 전략",
+                name="📊 스윙 설정",
+                value=f"예산: **{swing_budget:,} KRW**  |  진입 비중: **{swing_weight}%**\n"
+                      f"→ 1회 매수 기준금액: **{swing_trade_amount:,} KRW**",
+                inline=False,
+            )
+            embed.add_field(
+                name="⚡ 스캘핑 설정",
+                value=f"예산: **{scalp_budget:,} KRW**  |  진입 비중: **{scalp_weight}%**\n"
+                      f"→ 1회 매수 기준금액: **{scalp_trade_amount:,} KRW**",
+                inline=False,
+            )
+            embed.add_field(
+                name="📋 전략 요약",
                 value=(
-                    "**전략A** 추세 돌파 (MA50 상승 + RSI 55~70) — 익절 **6.0%** / 손절 **4.0%** (R:R 1.5:1)\n"
-                    "**전략B** 낙폭 반등 (MA50 하락 + RSI < 25) — 익절 **3.0%** / 손절 **2.5%** (R:R 1.2:1)\n"
-                    "BTC 상태에 따라 전략A/B 자동 전환 | 메이저 코인 거래 차단"
+                    "**스윙** 전략A 추세돌파 + 전략B 낙폭반등 자동전환 | 6회/일\n"
+                    "**스캘핑** Close>MA20 + RSI 60~75 | TP 2% / SL 1.5% | 24회/일"
                 ),
                 inline=False,
             )
-            next_time = get_next_run_time_for_style(self._style)
-            embed.set_footer(text=f"⏳ 다음 AI 분석: {next_time} | 01·05·09·13·17·21시 실행 (4h 봉 기준)")
+            embed.set_footer(text="스윙: 01·05·09·13·17·21시 KST | 스캘핑: 매시 정각 실행")
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+def _make_disabled_embed(max_coins: int, total_budget: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="⏸️ AI 실전 자동 매매 비활성화",
+        description="신규 AI 매수가 중단됩니다. 기존 실행 중인 워커는 계속 동작합니다.",
+        color=discord.Color.greyple(),
+    )
+    embed.add_field(name="AI 모드", value="⏸️ 비활성화", inline=True)
+    embed.add_field(name="최대 보유 종목", value=f"{max_coins}개", inline=True)
+    embed.add_field(name="설정 예산", value=f"{total_budget:,} KRW", inline=True)
+    embed.set_footer(text="AI 자동 매매가 중지되었습니다. 기존 워커는 계속 동작합니다.")
+    return embed
 
 
 # ------------------------------------------------------------------
@@ -384,12 +694,7 @@ class AIShutdownView(discord.ui.View):
     async def graceful_stop(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        """신규 매수를 즉시 중단하고, 기존 포지션은 익절/손절 기준으로 자동 매도되기를 기다린다.
-
-        ai_is_shutting_down=True 로 설정하면 ai_manager 가 다음 사이클부터
-        analyze_market 및 _buy_new_coins 를 완전히 건너뛰고,
-        모든 포지션이 청산되면 ai_mode_enabled=False 로 자동 전환한다.
-        """
+        """신규 매수를 즉시 중단하고, 기존 포지션은 익절/손절 기준으로 자동 매도되기를 기다린다."""
         await interaction.response.defer(ephemeral=True)
         await self._disable_all(interaction)
 
@@ -423,16 +728,11 @@ class AIShutdownView(discord.ui.View):
     async def emergency_stop(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        """현재 보유 중인 실전 AI 포지션을 즉시 시장가로 전량 매도한다.
-
-        매수 대기 중인 워커도 취소(DB 초기화)한다.
-        ai_mode_enabled=False, ai_is_shutting_down=False 로 완전 비활성화.
-        """
+        """현재 보유 중인 실전 AI 포지션을 즉시 시장가로 전량 매도한다."""
         await interaction.response.defer(ephemeral=True)
         await self._disable_all(interaction)
 
         registry = WorkerRegistry.get()
-        # 반복 중 딕셔너리 변경 방지를 위해 먼저 복사·필터링
         real_ai_workers = [
             w for w in list(registry._workers.values())
             if w.user_id == self._user_id and not w.is_paper_trading
@@ -444,7 +744,6 @@ class AIShutdownView(discord.ui.View):
         for worker in real_ai_workers:
             try:
                 if worker._position is not None:
-                    # 포지션 보유 중 → 즉시 시장가 청산
                     ok = await worker.force_sell("🔴 AI 즉시 종료")
                     if ok:
                         registry._workers.pop(worker.setting_id, None)
@@ -460,7 +759,6 @@ class AIShutdownView(discord.ui.View):
                             self._user_id, worker.symbol,
                         )
                 else:
-                    # 아직 매수 대기 중인 워커 → 취소 + DB 초기화
                     await registry.unregister(worker.setting_id)
                     sold_symbols.append(f"{worker.symbol} (매수 대기 취소)")
                     logger.info(
@@ -474,7 +772,6 @@ class AIShutdownView(discord.ui.View):
                     self._user_id, worker.symbol, exc,
                 )
 
-        # DB: AI 모드 완전 비활성화
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == self._user_id))
             db_user = result.scalar_one_or_none()
@@ -506,7 +803,7 @@ class AIShutdownView(discord.ui.View):
 # ------------------------------------------------------------------
 
 class AITradingCog(commands.Cog):
-    """AI 자동 매매 관련 슬래시 커맨드 Cog."""
+    """AI 자동 매매 관련 슬래시 커맨드 Cog (V2 — 모듈형 엔진 선택)."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -516,10 +813,10 @@ class AITradingCog(commands.Cog):
         description="VIP 전용 AI 실전 자동 매매 펀드 매니저를 설정합니다.",
     )
     async def ai_settings_command(self, interaction: discord.Interaction) -> None:
-        """VIP 여부를 확인한 뒤 드롭다운 선택 View(1단계)를 띄운다.
+        """VIP 여부를 확인한 뒤 엔진 선택 View(1단계)를 띄운다.
 
         [VIP 검증] FREE / PRO 등급이면 업그레이드 유도 Embed로 즉시 반환.
-        [설정 UI ] 드롭다운(모드·성향) → "다음 →" 버튼 → Modal(금액·종목수) 2단계 흐름.
+        [설정 UI ] 드롭다운(모드·엔진) → "다음 →" 버튼 → Modal(예산·비중) 2단계 흐름.
         """
         user_id = str(interaction.user.id)
 
@@ -527,36 +824,50 @@ class AITradingCog(commands.Cog):
             result = await db.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
 
-        # VIP 등급 검증 (미등록 유저 포함)
         if user is None or user.subscription_tier != SubscriptionTier.VIP:
             await interaction.response.send_message(
                 embed=_make_vip_required_embed(), ephemeral=True
             )
             return
 
-        # ── 현재 설정값 요약 Embed + View 표시 ───────────────────────
-        current_style = getattr(user, "ai_trade_style", "SNIPER")
-        style_label = (
-            "🔥 야수 모드 (BEAST, 70%)"
-            if current_style in ("BEAST", "SCALPING")
-            else "🛡️ 스나이퍼 모드 (SNIPER, 20%)"
-        )
+        engine_mode = getattr(user, "ai_engine_mode", None) or "SWING"
+        _ENGINE_LABELS = {
+            "SWING": "📊 4h 듀얼 스윙",
+            "SCALPING": "⚡ 1h 스캘핑",
+            "BOTH": "🔥 동시 가동 (스윙 + 스캘핑)",
+        }
+        engine_label = _ENGINE_LABELS.get(engine_mode, engine_mode)
+
+        swing_budget = int(getattr(user, "ai_swing_budget_krw", 1_000_000) or 1_000_000)
+        swing_weight = int(getattr(user, "ai_swing_weight_pct", 20) or 20)
+        scalp_budget = int(getattr(user, "ai_scalp_budget_krw", 1_000_000) or 1_000_000)
+        scalp_weight = int(getattr(user, "ai_scalp_weight_pct", 20) or 20)
+
         embed = discord.Embed(
-            title="🤖 AI 실전 자동 매매 설정",
+            title="🤖 AI 실전 자동 매매 설정 (V2)",
             description=(
-                "드롭다운에서 **AI 모드**와 **투자 성향**을 선택한 뒤\n"
-                "**⚙️ 다음 →** 버튼을 눌러 매수 금액을 입력하세요."
+                "드롭다운에서 **AI 모드**와 **가동 엔진**을 선택한 뒤\n"
+                "**⚙️ 다음 →** 버튼을 눌러 예산과 비중을 입력하세요."
             ),
             color=discord.Color.blue(),
         )
+        current_value_lines = [
+            f"AI 모드: **{'ON' if user.ai_mode_enabled else 'OFF'}**",
+            f"가동 엔진: **{engine_label}**",
+        ]
+        if engine_mode in ("SWING", "BOTH"):
+            current_value_lines.append(
+                f"📊 스윙 설정: **{swing_budget:,} KRW** / **{swing_weight}%**"
+            )
+        if engine_mode in ("SCALPING", "BOTH"):
+            current_value_lines.append(
+                f"⚡ 스캘핑 설정: **{scalp_budget:,} KRW** / **{scalp_weight}%**"
+            )
+        current_value_lines.append(f"최대 종목: **{user.ai_max_coins}개**")
+
         embed.add_field(
             name="현재 설정",
-            value=(
-                f"AI 모드: **{'ON' if user.ai_mode_enabled else 'OFF'}**\n"
-                f"투자 성향: **{style_label}**\n"
-                f"1회 매수: **{int(user.ai_trade_amount):,} KRW** "
-                f"| 최대 종목: **{user.ai_max_coins}개**"
-            ),
+            value="\n".join(current_value_lines),
             inline=False,
         )
         embed.set_footer(text="⏱️ 이 메시지는 3분 후 만료됩니다.")
@@ -569,12 +880,7 @@ class AITradingCog(commands.Cog):
         description="실전 AI 펀드 매니저를 종료합니다. (연착륙 또는 즉시 강제 종료)",
     )
     async def ai_shutdown_command(self, interaction: discord.Interaction) -> None:
-        """AI 종료 방식을 선택하는 View를 표시한다.
-
-        - VIP + ai_mode_enabled 상태인 유저만 사용 가능.
-        - 연착륙: 신규 매수 중단, 기존 포지션은 익절/손절 기준 자동 매도 후 자동 비활성화.
-        - 즉시 종료: 보유 포지션 전량 시장가 매도 후 AI 즉시 비활성화.
-        """
+        """AI 종료 방식을 선택하는 View를 표시한다."""
         user_id = str(interaction.user.id)
 
         async with AsyncSessionLocal() as db:
@@ -595,7 +901,6 @@ class AITradingCog(commands.Cog):
                 )
                 return
 
-            # 현재 실행 중인 실전 AI 포지션 수 조회
             pos_result = await db.execute(
                 select(BotSetting).where(
                     BotSetting.user_id == user_id,
