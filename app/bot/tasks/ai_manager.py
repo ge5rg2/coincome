@@ -421,7 +421,7 @@ class AIFundManagerTask(commands.Cog):
             )
             if swing_analysis.get("market_summary"):
                 market_summaries.append(
-                    f"📊 **스윙 엔진**\n{swing_analysis['market_summary']}"
+                    f"**📊 [스윙 엔진 분석]**\n{swing_analysis['market_summary']}"
                 )
             swing_picks: list[dict] = swing_analysis.get("picks", [])
 
@@ -501,7 +501,7 @@ class AIFundManagerTask(commands.Cog):
             )
             if scalp_analysis.get("market_summary"):
                 market_summaries.append(
-                    f"⚡ **스캘핑 엔진**\n{scalp_analysis['market_summary']}"
+                    f"**⚡ [스캘핑 엔진 분석]**\n{scalp_analysis['market_summary']}"
                 )
             scalp_picks: list[dict] = scalp_analysis.get("picks", [])
 
@@ -550,7 +550,12 @@ class AIFundManagerTask(commands.Cog):
                 logger.info("모의 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
         # ── Step 4: 통합 DM Embed 발송 ───────────────────────────────
-        market_summary = "\n\n".join(market_summaries) if market_summaries else ""
+        # BOTH 모드에서 두 엔진 요약이 모두 있을 때 구분선으로 명확히 분리한다.
+        # 단일 엔진이거나 항목이 1개이면 단순 줄바꿈으로 합산한다.
+        if engine_mode == "BOTH" and len(market_summaries) > 1:
+            market_summary = "\n\n──────────────────\n\n".join(market_summaries)
+        else:
+            market_summary = "\n\n".join(market_summaries) if market_summaries else ""
         embed = self._build_unified_report_embed(
             market_summary=market_summary,
             real_reviewed=real_reviewed,
