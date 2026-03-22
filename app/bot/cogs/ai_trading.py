@@ -9,7 +9,7 @@
 
 Discord API 제약:
   Modal 내부에는 TextInput 만 허용 (Select 불가).
-  드롭다운 선택지(ON/OFF, SWING/SCALPING)는 Step 2 View 단계에서 처리하고,
+  드롭다운 선택지(ON/OFF, SNIPER/BEAST)는 Step 2 View 단계에서 처리하고,
   선택된 값을 Step 3 Modal 생성자에 전달한다.
 """
 from __future__ import annotations
@@ -48,8 +48,8 @@ def _make_vip_required_embed() -> discord.Embed:
         name="🤖 VIP AI 펀드 매니저 기능",
         value=(
             "• 4시간마다 전체 KRW 마켓 자동 스크리닝\n"
-            "• GPT-4o-mini 기반 RSI·MA 지표 분석\n"
-            "• 최대 2개 종목 자동 매수 및 워커 자동 등록\n"
+            "• Claude Sonnet 듀얼 전략 엔진 (추세 돌파 + 낙폭 반등 자동 전환)\n"
+            "• 최대 N개 종목 자동 매수 및 워커 자동 등록\n"
             "• 매수 후 DM 리포트 자동 발송"
         ),
         inline=False,
@@ -104,13 +104,13 @@ class StyleSelect(discord.ui.Select):
             discord.SelectOption(
                 label="🛡️ SNIPER — 시드 20% 안전 모드",
                 value="SNIPER",
-                description="4h 모멘텀 돌파 | 알트코인 집중 | 안정 우상향",
+                description="듀얼 전략 자동 전환 | 알트코인 집중 | 안정 우상향",
                 default=current_style in ("SNIPER", "SWING"),
             ),
             discord.SelectOption(
                 label="🔥 BEAST — 시드 70% 공격 모드",
                 value="BEAST",
-                description="동일 v7 전략 | 고비중 투입 | 하이리스크 하이리턴",
+                description="듀얼 전략 자동 전환 | 고비중 투입 | 하이리스크 하이리턴",
                 default=current_style in ("BEAST", "SCALPING"),
             ),
         ]
@@ -310,9 +310,9 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 예산 설정"):
             embed.add_field(
                 name="📋 전략",
                 value=(
-                    "v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
-                    "손익비 1.5:1 강제 — 익절 **6.0%** / 손절 **4.0%**\n"
-                    "BTC·ETH 등 메이저 코인 거래 차단 (휩쏘 방지)"
+                    "**전략A** 추세 돌파 (MA50 상승 + RSI 55~70) — 익절 **6.0%** / 손절 **4.0%** (R:R 1.5:1)\n"
+                    "**전략B** 낙폭 반등 (MA50 하락 + RSI < 25) — 익절 **3.0%** / 손절 **2.5%** (R:R 1.2:1)\n"
+                    "BTC 상태에 따라 전략A/B 자동 전환 | 메이저 코인 거래 차단"
                 ),
                 inline=False,
             )
@@ -337,9 +337,9 @@ class AIAmountModal(discord.ui.Modal, title="AI 실전 — 예산 설정"):
             embed.add_field(
                 name="📋 전략",
                 value=(
-                    "v7 알트코인 4h 모멘텀 돌파 (MA50 상승장 + RSI 55~70)\n"
-                    "손익비 1.5:1 강제 — 익절 **6.0%** / 손절 **4.0%**\n"
-                    "BTC·ETH 등 메이저 코인 거래 차단 (휩쏘 방지)"
+                    "**전략A** 추세 돌파 (MA50 상승 + RSI 55~70) — 익절 **6.0%** / 손절 **4.0%** (R:R 1.5:1)\n"
+                    "**전략B** 낙폭 반등 (MA50 하락 + RSI < 25) — 익절 **3.0%** / 손절 **2.5%** (R:R 1.2:1)\n"
+                    "BTC 상태에 따라 전략A/B 자동 전환 | 메이저 코인 거래 차단"
                 ),
                 inline=False,
             )
