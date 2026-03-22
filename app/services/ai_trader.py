@@ -2,16 +2,18 @@
 AITraderService: Anthropic claude-sonnet-4-6 기반 코인 종목 분석·픽 서비스.
 
 백테스트 3종 LLM 벤치마크 결과 Claude가 지시사항 준수율·수익률 모두 1위로 채택.
-추세 돌파 스나이퍼 v7 (알트코인 전용): Close>MA50 장기 추세 필터 + RSI 55~70 확인된 모멘텀 돌파.
-백테스트 v7 결과: 승률 44.6% / MDD -19.1% / 수익률 +91.4% (알트코인 집중 전략).
+듀얼 엔진 전략 — 시장 상황에 따라 두 전략 자동 전환:
+  전략A (추세 돌파 v7): Close>MA50 + RSI 55~70 — 상승장 전용, TP 6% / SL 4% (R:R 1.5:1)
+    백테스트 결과: 승률 44.6% / MDD -19.1% / ROI +91.4% (알트코인 집중)
+  전략B (낙폭과대 반등 Reversal v2): Close<MA50 + RSI<25 — 하락·혼조장 전용, TP 3% / SL 2.5% (R:R 1.2:1)
+    백테스트 결과: 승률 목표 ≥55% / MDD 억제 우선 (짧은 기술적 반등 스나이핑)
 BLACKLIST(8개): BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE — Python 단에서 AI에 데이터 미전달 (토큰 절약 + 휩쏘 원천 차단).
-(구 v5 RSI 50~65 역추세 전략 → v6 MA50 추가 → v7 블랙리스트 알트 집중 전략으로 진화)
 
 analyze_market() 호출 흐름:
   1. MarketDataManager 캐시 데이터 + 가용 예산 → 블랙리스트 필터링 후 유저 프롬프트 직렬화
-     (4h MA50 지표 포함 — v7 신규: 장기 추세 필터용)
+     (4h MA50 지표 포함 — 장기 추세 방향 판단, 전략A/B 진입 기준 모두 MA50 사용)
   2. claude-sonnet-4-6 에 _CORE_SNIPER_PROMPT + 유저 프롬프트 전송 (JSON 출력 강제)
-  3. 응답 JSON 파싱 → score ≥ 90 필터 · stop ≤ 5% 검증 · R:R ≥ 1.5 강제 · 최대 2개 제한
+  3. 응답 JSON 파싱 → score ≥ 90 필터 · stop ≤ 5% 하드 상한 · R:R ≥ 1.2 최소 보정 · 최대 2개 제한
   4. trade_style에 따라 weight_pct 코드 레벨에서 강제 덮어쓰기 후 반환
 
 반환 형식 (analyze_market):
@@ -19,12 +21,12 @@ analyze_market() 호출 흐름:
     "market_summary":  "현재 시장 전반 분석 2~3문장.",
     "picks": [
       {
-        "symbol":            "BTC/KRW",
+        "symbol":            "LINK/KRW",
         "score":             92,           # 0~100점 (90 이상만 포함)
         "weight_pct":        20.0,         # SNIPER=20.0 / BEAST=70.0 (AI 응답 무시, 코드 고정)
-        "reason":            "4h RSI 57 상승 모멘텀, MA20 돌파 지지 확인",
-        "target_profit_pct": 6.0,          # stop × 1.5 이상 보장 (코드 레벨 강제)
-        "stop_loss_pct":     3.5,          # 최대 5.0% 하드 상한 (코드 레벨 강제)
+        "reason":            "[전략A 추세돌파] 4h RSI 62 모멘텀, MA50 위 상승 추세 확인",
+        "target_profit_pct": 6.0,          # stop × 1.2 이상 보장 (코드 레벨 강제)
+        "stop_loss_pct":     4.0,          # 최대 5.0% 하드 상한 (코드 레벨 강제)
       },
       ...
     ]
@@ -38,7 +40,7 @@ review_positions() 호출 흐름:
 반환 형식 (review_positions):
   [
     {
-      "symbol":              "BTC/KRW",
+      "symbol":              "LINK/KRW",
       "action":              "HOLD" | "UPDATE" | "SELL",
       "new_target_profit_pct": 5.0,   # SELL 시 None
       "new_stop_loss_pct":     7.5,   # SELL 시 None
@@ -50,7 +52,7 @@ review_positions() 호출 흐름:
 trade_style 분기 (비중 결정 전용 — 진입 로직은 공통):
   SNIPER — 🛡️ 인텔리전트 스나이퍼 (기본/안전 모드): weight_pct = 20.0 고정
   BEAST  — 🔥 야수의 심장 (공격 모드):              weight_pct = 70.0 고정
-  진입 타점 판단 로직(시스템 프롬프트·RSI 조건·손절 기준)은 두 모드 모두 동일.
+  진입 전략(A/B) 선택 및 타점 판단은 두 모드 모두 동일 — AI가 시장 상황에 따라 자동 결정.
 """
 from __future__ import annotations
 
@@ -89,18 +91,20 @@ def _safe_pct(value: object, *, default: float) -> float:
 
 
 # ------------------------------------------------------------------
-# 시스템 프롬프트 — 추세 돌파 스나이퍼 v7 (알트코인 전용, SNIPER·BEAST 공용)
-# 전략: Close > MA20 & MA50 (장기 추세 필터) + RSI 55~70 확인된 모멘텀 돌파
-#       TP 6.0% / SL 4.0% (R:R 1.5:1) — 백테스트 v7 결과 승률 44.6% / MDD -19.1%
+# 시스템 프롬프트 — 전천후 듀얼 엔진 (알트코인 전용, SNIPER·BEAST 공용)
+# 전략A 추세 돌파: Close > MA50 + RSI 55~70 / TP 6.0% / SL 4.0% (R:R 1.5:1)
+#   백테스트 v7: 승률 44.6% / MDD -19.1% / ROI +91.4%
+# 전략B 낙폭과대 반등: Close < MA50 + RSI < 25 / TP 3.0% / SL 2.5% (R:R 1.2:1)
+#   백테스트 Reversal v2: 승률 목표 ≥55% / MDD 억제 (하락장 서브 전략)
 # 비중(weight_pct)은 Python 코드 레벨에서 덮어씀 (AI 응답값 무시).
 # BTC/ETH/XRP/DOGE 등 메이저 코인은 Python 단에서 이미 BLACKLIST 처리되어
 # 이 프롬프트에 도달하는 데이터에는 포함되지 않음 (토큰 낭비·휩쏘 원천 차단).
 # ------------------------------------------------------------------
 
 _CORE_SNIPER_PROMPT = """\
-너는 4시간 봉 기반의 '추세 돌파 스나이퍼 v7 (알트코인 전용)' 트레이더야.
-상승 모멘텀이 확실히 붙기 시작하는 타점을 포착해 명확한 손익비(R:R ≥ 1.5)로 진입하는 것이 핵심이다.
-무거운 메이저 코인들은 이미 시스템 레벨에서 제외되었으므로, 오직 제공된 종목들의 개별 지표만 철저하게 분석해.
+너는 4시간 봉 기반의 '전천후 듀얼 엔진 트레이더'야.
+시장 상황에 따라 두 가지 전략(A: 추세 돌파 / B: 낙폭과대 반등) 중 하나를 선택해 진입한다.
+BTC/ETH/XRP/DOGE/ADA/SOL/SUI/PEPE 등 무거운 메이저 코인은 이미 시스템 레벨에서 제외되었으므로 제공된 알트코인들만 분석해.
 이미 유저가 보유 중인 코인은 반드시 제외해.
 확신이 없으면 picks 배열을 비워서 관망해도 된다 — 관망 자체가 최고의 전략일 수 있다.
 
@@ -111,52 +115,82 @@ _CORE_SNIPER_PROMPT = """\
     {
       "symbol":            "LINK/KRW",
       "score":             92,
-      "reason":            "4h RSI 62 모멘텀 확인, MA50·MA20 위 장기 상승 추세 내 진입. ATR 2.0% — stop 4.0% / target 6.0% (R:R 1.5)",
+      "reason":            "[전략A 추세돌파] 4h RSI 62 모멘텀 확인, MA50 위 장기 상승 추세. ATR 2.0% — stop 4.0% / target 6.0% (R:R 1.5)",
       "target_profit_pct": 6.0,
       "stop_loss_pct":     4.0
     }
   ]
 }
 
-[핵심 매매 원칙 — 추세 돌파 스나이퍼 v7 (알트코인 전용)]
+[핵심 매매 원칙 — 전천후 듀얼 엔진 (알트코인 전용)]
 
-※ 이 전략은 거시 시장 지수와 무관하게 오직 '개별 코인의 MA50 돌파 모멘텀'만으로 진입을 판단한다. 주어진 데이터에만 집중할 것.
+1. BTC 시장 국면 필터 (최우선 — 모든 원칙보다 우선):
+   - BTC/KRW가 4h MA20 아래에 있거나, BTC 4h RSI14 < 45이면:
+     → 전략A(추세 돌파) 완전 금지. 단, 전략B(낙폭과대 반등)는 RSI < 25 조건이 충족된 종목에 한해 허용.
+   - BTC 4h RSI14가 45~55 사이라면 전략A는 score 95 이상의 확실한 종목만 고려, 아니면 관망.
+   - BTC 4h RSI14 ≥ 55이고 MA20 위에 있을 때 전략A 정상 진입 가능.
+   ※ BTC 데이터는 시장 국면 판단용으로만 사용 — BTC 자체는 절대 픽하지 말 것.
 
-1. 진입 타점 — 개별 코인의 확인된 모멘텀 돌파 (Confirmed Momentum Breakout):
-   - [절대 금지] 4h RSI14 < 55인 종목: 모멘텀 불확실 구간 — 어떤 이유로도 절대 진입 금지
-   - [절대 금지] 현재가 < 4h MA50: 중장기 하락 추세 구간 — 반드시 패스 (휩쏘 위험 극대)
-   - [최우선 진입] 4h RSI14 55~70 + 현재가 > 4h MA50 위에 있는 종목:
-     → 이 조건이 충족된 종목은 시장 전반 분위기와 무관하게 '확인된 모멘텀 돌파'로 판단,
-        반드시 공격적으로 픽할 것 — 주저하지 말고 score ≥ 90이면 즉시 진입 타점으로 처리
-     → 현재가가 4h MA20을 방금 돌파했거나, MA20 위에서 눌렸다가 재상승 중인 종목 최우선
-     → 1h RSI가 55 이상으로 올라서며 단기 모멘텀을 동반하는 종목에 추가 가산점
-   - 거래대금(24h) 상위권 종목 중 추세가 명확한 것만 선택 (유동성 + 추세 동반 필수)
+2. 진입 전략 선택 (A / B 중 하나 — 같은 종목에 중복 적용 금지):
+
+   ▶ 전략A — 추세 돌파 (Momentum Breakout, 상승장 전용):
+   - [진입 필수 조건] 4h RSI14 55~70 구간 AND 현재가 > 4h MA50 (장기 상승 추세 내 위치)
+   - [진입 금지] 4h RSI14 < 55: 모멘텀 불확실 구간 — 절대 진입 금지
+   - [진입 금지] 현재가 < 4h MA50: 중장기 하락 추세 — 반드시 패스 (휩쏘 위험 극대)
    - [진입 금지] 과매수 구간(4h RSI14 > 70): 이미 많이 오른 종목 — 되돌림 위험
-   - score 90 이상만 진입 (절대 90 미만 금지 — 진입 빈도를 낮춰야 한다)
+   - 현재가가 4h MA20을 방금 돌파했거나, MA20 위에서 눌렸다가 재상승 중인 종목 최우선
+   - 1h RSI가 55 이상으로 올라서며 단기 모멘텀을 동반하는 종목에 가산점
+   - 거래대금(24h) 상위권 종목 중 추세가 명확한 것만 선택 (유동성 + 추세 동반 필수)
+   - reason 태그: "[전략A 추세돌파]" 로 시작 (예: "[전략A 추세돌파] 4h RSI 62, MA50 위 상승 추세. TP 6.0% / SL 4.0%")
 
-2. 손절폭 — 타이트한 설계 (기본 4.0%, 하드 상한 5.0%):
-   - 기본 가이드: stop_loss_pct = 4.0% (백테스트 v7 기준값 — TP 6.0% / SL 4.0% = R:R 1.5:1)
+   ▶ 전략B — 낙폭과대 반등 (Oversold Reversal, 하락·혼조장 전용):
+   - [진입 필수 조건] 4h RSI14 < 25 (극단적 투매/공포 구간) AND 현재가 < 4h MA50 (하락 추세 확인)
+   - RSI가 20 이하로 내려갈수록 반등 강도 높을 가능성 증가 → 가산점
+   - 거래량이 평소 대비 급증한 경우 (투매 피크 신호) 가산점
+   - [진입 금지] 4h RSI14 ≥ 25: 이미 과매도 구간 탈출 중 — 적정 타점 아님
+   - [진입 금지] 현재가 > 4h MA50: 하락 추세 미확인 — 전략B 진입 기준 미충족
+   - 짧은 기술적 반등만 노리므로 목표가를 욕심내지 말 것 (3.0~4.0% 범위 유지)
+   - reason 태그: "[전략B 역추세]" 로 시작 (예: "[전략B 역추세] 4h RSI 22 극단적 공포, MA50 하단. TP 3.0% / SL 2.5%")
+
+   ※ 두 조건은 상호 배타적 (MA50 위·아래 + RSI 기준이 겹칠 수 없음) — 중복 진입 불가
+   ※ score 90 이상만 진입 (절대 90 미만 금지 — 진입 빈도를 낮춰야 한다)
+   ※ 현재가 100 KRW 미만 동전주는 전략 불문 스킵
+
+3. 손절폭 (선택한 전략에 따라 다르게 적용):
+
+   ▶ 전략A 진입 시 — 손절 기본 4.0% (하드 상한 5.0%):
+   - 기본 가이드: stop_loss_pct = 4.0% (백테스트 v7 기준, R:R 1.5:1)
    - stop_loss_pct = ATR% × 1.5~2배 수준으로 동적 조정 가능
-   - [하드 상한] stop_loss_pct는 절대 5.0%를 초과할 수 없음
-     → 5%를 넘어야 하는 종목은 변동성 과대 잡알트로 판단해 반드시 패스
-   - 예시: ATR 2.0% → stop 3.0~4.0% / ATR 2.5% → stop 4.0~5.0%
+   - [하드 상한] stop_loss_pct 절대 5.0% 초과 불가 → 5% 초과 종목은 고변동성 잡알트로 판단해 패스
 
-3. 목표가 — 수학적 손익비 1.5:1 이상 강제 (R:R ≥ 1.5):
-   - 기본 가이드: target_profit_pct = 6.0% (백테스트 v7 기준값 — TP 6.0% / SL 4.0% = R:R 1.5:1)
+   ▶ 전략B 진입 시 — 손절 기본 2.5% (하드 상한 3.0%):
+   - 기본 가이드: stop_loss_pct = 2.5% (백테스트 Reversal v2 기준, R:R 1.2:1)
+   - [하드 상한] stop_loss_pct 절대 3.0% 초과 불가 → 짧은 반등 전략 특성상 타이트한 손절 필수
+   - 예시: stop 2.5% → target 최소 3.0% (R:R 1.2:1)
+
+4. 목표가 (선택한 전략에 따라 다르게 적용):
+
+   ▶ 전략A 진입 시 — 목표 기본 6.0% (R:R ≥ 1.5 강제):
+   - 기본 가이드: target_profit_pct = 6.0% (백테스트 v7 기준값)
    - [필수 규칙] target_profit_pct ≥ stop_loss_pct × 1.5
-     (예: 손절 3.0% → 익절 최소 4.5% / 손절 4.0% → 익절 최소 6.0%)
+     (예: 손절 4.0% → 익절 최소 6.0%)
    - 직전 저항선을 고려해 현실적인 도달 가능 범위 내에서 설정
-   - R:R 1.5 미달이 되는 경우(저항이 너무 가까움) 반드시 패스
 
-4. 일반 규칙:
+   ▶ 전략B 진입 시 — 목표 기본 3.0% (R:R ≥ 1.2 강제):
+   - 기본 가이드: target_profit_pct = 3.0% (백테스트 Reversal v2 기준값)
+   - [필수 규칙] target_profit_pct ≥ stop_loss_pct × 1.2
+     (예: 손절 2.5% → 익절 최소 3.0%)
+   - 기술적 반등만 노리므로 목표를 3.0~4.0% 범위로 유지할 것 (욕심 금지)
+
+5. 일반 규칙:
    - symbol은 "코인명/KRW" 형태 (예: LINK/KRW)
    - 모든 숫자 필드는 순수 숫자만 (%, +/- 없음)
-   - 현재가 100 KRW 미만 동전주는 스킵
-   - market_summary는 관망 시에도 반드시 작성 (관망 이유 명확히 포함)
+   - reason 필드에 반드시 "[전략A 추세돌파]" 또는 "[전략B 역추세]" 태그로 시작할 것
+   - market_summary는 관망 시에도 반드시 작성 (관망 이유 및 현재 채택 전략 명확히 포함)
 """
 
 # ------------------------------------------------------------------
-# 포지션 리뷰용 시스템 프롬프트 (SNIPER·BEAST 공용)
+# 포지션 리뷰용 시스템 프롬프트 (SWING·SCALPING 공용)
 # ------------------------------------------------------------------
 
 _REVIEW_SYSTEM_PROMPT = """\
@@ -297,7 +331,7 @@ class AITraderService:
                 len(blacklisted_in_market), ", ".join(sorted(blacklisted_in_market)),
             )
 
-        lines: list[str] = ["# Top 코인 시장 데이터 (멀티 타임프레임)\n"]
+        lines: list[str] = [f"# Top 코인 시장 데이터 (멀티 타임프레임)\n"]
         for symbol, data in market_data.items():
             # v7: 블랙리스트 코인은 AI에 데이터 자체를 주지 않음
             # (프롬프트에서 제외 지시만 하는 것보다 강력한 원천 차단)
@@ -426,8 +460,10 @@ class AITraderService:
                 )
                 continue
 
-            # stop_loss_pct 검증: 하드 상한 5.0% (추세 돌파 전략 v5 — 타이트한 손절)
-            # 구 전략(역추세): 7~9% 허용 → 신 전략(모멘텀 돌파): ATR×1.5~2배, 최대 5%
+            # stop_loss_pct 검증: 하드 상한 5.0%
+            # 전략A (추세 돌파): ATR×1.5~2배, 기본 4%, 상한 5%
+            # 전략B (낙폭과대 반등): 기본 2.5%, 상한 3% — 프롬프트에서 AI가 지키도록 지시
+            # 코드 레벨 단일 상한은 5.0%로 설정 (전략B는 프롬프트 룰로 3% 이하 준수 유도)
             raw_stop = _safe_pct(p.get("stop_loss_pct", 3.5), default=3.5)
             if raw_stop > 5.0:                    # 하드 상한 5% 초과 → 손익비 구조 붕괴 차단
                 logger.info(
@@ -436,10 +472,12 @@ class AITraderService:
                 continue
             stop_loss_pct = raw_stop
 
-            # target_profit_pct: 손익비 R:R ≥ 1.5 코드 레벨 강제 (AI 지시사항 이중 방어)
-            # AI가 stop × 1.5 미만 target을 내놓을 경우 자동 보정해 손익비 구조를 유지
+            # target_profit_pct: 손익비 R:R ≥ 1.2 코드 레벨 최솟값 보정 (AI 이중 방어)
+            # 전략A는 프롬프트에서 R:R ≥ 1.5 지시, 전략B는 R:R ≥ 1.2 지시.
+            # 코드 레벨 최솟값 1.2로 통일 — 두 전략의 하한을 모두 커버하되
+            # 전략A의 1.5:1 은 프롬프트 지시로 AI가 준수하도록 유도.
             raw_target      = _safe_pct(p.get("target_profit_pct", 5.0), default=5.0)
-            min_target      = round(stop_loss_pct * 1.5, 2)   # R:R 1.5:1 최솟값
+            min_target      = round(stop_loss_pct * 1.2, 2)   # R:R 1.2:1 최솟값 (듀얼 전략 공통 하한)
             target_profit_pct = max(raw_target, min_target)
 
             # weight_pct: trade_style 기반 코드 레벨 강제 덮어쓰기 (AI 응답값 무시)
@@ -511,18 +549,16 @@ class AITraderService:
             atr_pct   = mdata.get("atr_pct")
             rsi14_4h  = mdata.get("rsi14")
             ma20_4h   = mdata.get("ma20")
-            ma50_4h   = mdata.get("ma50")       # v7 핵심: 4h MA50 장기 추세 필터 (Close > MA50)
             rsi14_1h  = mdata.get("rsi14_1h")
             ma20_1h   = mdata.get("ma20_1h")
             rsi14_15m = mdata.get("rsi14_15m")
 
-            atr_str     = f"{atr_pct:.2f}%"                if atr_pct   is not None else "N/A"
-            rsi4h_str   = f"{rsi14_4h:.1f}"                if rsi14_4h  is not None else "N/A"
-            ma20_4h_str = f"{format_krw_price(ma20_4h)}"   if ma20_4h   is not None else "N/A"
-            ma50_4h_str = f"{format_krw_price(ma50_4h)}"   if ma50_4h   is not None else "N/A"
-            rsi1h_str   = f"{rsi14_1h:.1f}"                if rsi14_1h  is not None else "N/A"
-            ma1h_str    = f"{format_krw_price(ma20_1h)}"   if ma20_1h   is not None else "N/A"
-            rsi15m_str  = f"{rsi14_15m:.1f}"               if rsi14_15m is not None else "N/A"
+            atr_str    = f"{atr_pct:.2f}%"               if atr_pct   is not None else "N/A"
+            rsi4h_str  = f"{rsi14_4h:.1f}"               if rsi14_4h  is not None else "N/A"
+            ma4h_str   = f"{format_krw_price(ma20_4h)}"  if ma20_4h   is not None else "N/A"
+            rsi1h_str  = f"{rsi14_1h:.1f}"               if rsi14_1h  is not None else "N/A"
+            ma1h_str   = f"{format_krw_price(ma20_1h)}"  if ma20_1h   is not None else "N/A"
+            rsi15m_str = f"{rsi14_15m:.1f}"              if rsi14_15m is not None else "N/A"
 
             lines.append(
                 f"- {symbol}: "
@@ -531,7 +567,7 @@ class AITraderService:
                 f" | 변동성(ATR)={atr_str}"
                 f" | 15m(RSI={rsi15m_str})"
                 f" | 1h(RSI={rsi1h_str}, MA={ma1h_str})"
-                f" | 4h(RSI={rsi4h_str}, MA20={ma20_4h_str}, MA50={ma50_4h_str})"
+                f" | 4h(RSI={rsi4h_str}, MA={ma4h_str})"
             )
 
         user_prompt = "\n".join(lines)
@@ -600,23 +636,24 @@ class AITraderService:
                 )
             else:
                 # HOLD / UPDATE: 양수 강제 보정
-                # 명시적 None 체크 — `or` 연산자는 0.0을 falsy로 처리해 기본값으로 덮어쓰는 버그 방지
-                _tgt_raw = r.get("new_target_profit_pct")
-                _sl_raw  = r.get("new_stop_loss_pct")
-                new_tgt  = abs(float(
-                    _tgt_raw if _tgt_raw is not None
-                    else pos_defaults.get("target_profit_pct", 3.0)
-                ))
-                new_sl   = abs(float(
-                    _sl_raw if _sl_raw is not None
-                    else pos_defaults.get("stop_loss_pct", 2.0)
-                ))
                 validated.append(
                     {
                         "symbol": symbol,
                         "action": raw_action,
-                        "new_target_profit_pct": new_tgt,
-                        "new_stop_loss_pct":     new_sl,
+                        "new_target_profit_pct": abs(
+                            float(
+                                r.get("new_target_profit_pct",
+                                      pos_defaults.get("target_profit_pct", 3.0))
+                                or pos_defaults.get("target_profit_pct", 3.0)
+                            )
+                        ),
+                        "new_stop_loss_pct": abs(
+                            float(
+                                r.get("new_stop_loss_pct",
+                                      pos_defaults.get("stop_loss_pct", 2.0))
+                                or pos_defaults.get("stop_loss_pct", 2.0)
+                            )
+                        ),
                         "reason": str(r.get("reason", "")),
                     }
                 )
