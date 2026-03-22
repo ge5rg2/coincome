@@ -49,6 +49,12 @@ jobs:
             docker-compose run --rm app python -m scripts.add_ai_log_columns
             docker-compose run --rm app python -m scripts.add_bot_setting_ai_columns
 
+            # 4) AI 트레이딩 V2 엔진 컬럼 마이그레이션 (SWING/SCALPING/BOTH 모듈형 엔진)
+            docker-compose run --rm app python -m scripts.add_ai_v2_engine_columns
+
+            # 5) V2 아키텍처 데이터 마이그레이션 (기존 ai_trade_style → ai_engine_mode 변환)
+            docker-compose run --rm app python scripts/migrate_v2_architecture.py --apply
+
             # ---------------------------------------------------
 
             # 3. DB 세팅이 모두 끝났으니, 안전하게 새 봇을 실행!
