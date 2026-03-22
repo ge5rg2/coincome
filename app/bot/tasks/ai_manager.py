@@ -909,11 +909,8 @@ class AIFundManagerTask(commands.Cog):
         total_paper = len(paper_reviewed) + len(paper_bought)
         total       = total_real + total_paper
 
-        # ── 투자 비중 모드 레이블 (SNIPER·BEAST) ────────────────────────
-        if trade_style in ("BEAST", "SCALPING"):
-            style_label = "🔥 야수 모드 (BEAST)"
-        else:  # SNIPER / SWING (하위 호환)
-            style_label = "🛡️ 스나이퍼 모드 (SNIPER)"
+        # ── 투자 성향 레이블 ──────────────────────────────────────────
+        style_label = "⚡ 단타 (1h 봉)" if trade_style == "SCALPING" else "⚔️ 듀얼 스윙 (4h 봉)"
 
         # ── 컬러·제목 결정 ────────────────────────────────────────────
         color = discord.Color.blue() if total > 0 else discord.Color.greyple()
@@ -926,11 +923,11 @@ class AIFundManagerTask(commands.Cog):
         if parts:
             desc = " + ".join(parts) + " 처리"
         elif is_real_active and is_paper_active:
-            desc = "실전·모의투자 전액 현금 관망 중"
+            desc = "실전·모의투자 전액 현금 관망 중 (돌파/역추세 타점 부재)"
         elif is_real_active:
-            desc = "실전 전액 현금 관망 중"
+            desc = "실전 전액 현금 관망 중 (돌파/역추세 타점 부재)"
         elif is_paper_active:
-            desc = "모의투자 전액 가상 현금 관망 중"
+            desc = "모의투자 전액 가상 현금 관망 중 (돌파/역추세 타점 부재)"
         else:
             desc = "관망 중"
 
