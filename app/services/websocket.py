@@ -95,9 +95,18 @@ class UpbitWebsocketManager:
         """
         구독 심볼 전체를 교체한다. 변경이 없으면 아무것도 하지 않는다.
 
+        빈 집합이 전달되면 Upbit에 빈 codes 메시지를 보내지 않고 내부 구독만 초기화한다.
+        (빈 codes 리스트로 구독 요청 시 업비트가 오류 응답을 반환할 수 있음)
+
         Args:
             symbols: 구독할 심볼 집합 (ccxt 형식, 예: {'BTC/KRW', 'ETH/KRW'})
         """
+        if not symbols:
+            # 모든 워커 해제 시 빈 codes로 업비트 WebSocket에 전송하지 않도록 방어
+            if self._subscribed_symbols:
+                self._subscribed_symbols = set()
+                logger.info("모든 워커 해제 — WebSocket 구독 비워짐 (전송 없음)")
+            return
         if symbols == self._subscribed_symbols:
             return
         self._subscribed_symbols = set(symbols)
