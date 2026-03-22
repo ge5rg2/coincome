@@ -892,6 +892,7 @@ v2 백테스트 검증 완료 후 `ai_trader.py`의 `_CORE_SNIPER_PROMPT`를 전
 | `d815fbc` | 2026-03-22 | feat(backtest): fast_backtest_reversal v2 — MDD 방어용 파라미터 튜닝 (SL 2.5%, RSI < 25) |
 | `f8dd9ef` | 2026-03-22 | docs(state): Phase 7 역추세 전략 검증 이력 및 전천후 엔진 통합 목표 기록 |
 | `d11a0fd` | 2026-03-22 | feat(ai): 듀얼 엔진 통합 — 전략A 추세돌파 + 전략B 낙폭과대 반등 `ai_trader.py` 통합 |
+| `d9f3b3a` | 2026-03-22 | feat(bot): Discord UI 텍스트 — 듀얼 엔진 전략 반영 (VIP embed, 드롭다운 설명, 완료 Embed 전략 설명) |
 
 **Phase 7 결과**:
 - 역추세 전략 v1: 승률 51.5% (Edge 확인), BEAST MDD -60.9% → 파라미터 개선 필요
