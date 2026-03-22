@@ -341,6 +341,7 @@ class AIFundManagerTask(commands.Cog):
                 ai_max_coins=user.ai_max_coins,
                 real_position_count=len(real_running),
                 paper_position_count=len(paper_running),
+                is_swing_hour=is_swing_hour,
             )
             await self._send_dm_embed(user_id, embed)
 
@@ -562,6 +563,7 @@ class AIFundManagerTask(commands.Cog):
             ai_max_coins=user.ai_max_coins,
             real_position_count=len(real_running) + len(real_bought),
             paper_position_count=len(paper_running) + len(paper_bought),
+            is_swing_hour=is_swing_hour,
         )
         await self._send_dm_embed(user_id, embed)
 
@@ -991,12 +993,14 @@ class AIFundManagerTask(commands.Cog):
         ai_max_coins: int = 3,
         real_position_count: int = 0,
         paper_position_count: int = 0,
+        is_swing_hour: bool = True,
     ) -> discord.Embed:
         """실전·모의투자 결과를 하나의 Embed로 통합한다.
 
         - 실전 항목: 일반 표기
         - 모의 항목: [🎮모의] 태그 명시
         - 두 모드 모두 없거나 관망이면 중립 색상
+        - BOTH 모드에서 스윙 비가동 시각이면 스윙 엔진 대기 중 안내 추가
 
         Args:
             market_summary:        AI가 생성한 시장 전반 분석 요약.
@@ -1010,6 +1014,8 @@ class AIFundManagerTask(commands.Cog):
             ai_max_coins:          유저 설정 최대 동시 보유 종목 수.
             real_position_count:   이번 사이클 후 실전 보유 종목 수 (기존 + 신규).
             paper_position_count:  이번 사이클 후 모의 보유 종목 수 (기존 + 신규).
+            is_swing_hour:         현재 KST 시각이 4h 봉 마감 시각인지 여부
+                                   (BOTH 모드 스윙 엔진 대기 안내에 사용).
 
         Returns:
             단일 discord.Embed 객체.
@@ -1018,24 +1024,38 @@ class AIFundManagerTask(commands.Cog):
         total_paper = len(paper_reviewed) + len(paper_bought)
         total       = total_real + total_paper
 
+        # ── BOTH 모드 + 비스윙 시각: 스윙 엔진 대기 플래그 ──────────
+        swing_is_idle = (engine_mode == "BOTH" and not is_swing_hour)
+
         # ── 엔진 모드 레이블 ──────────────────────────────────────────
         if engine_mode == "SCALPING":
             style_label = "⚡ 스캘핑 (1h 봉)"
         elif engine_mode == "BOTH":
-            style_label = "🔥 동시 가동 (스윙+스캘핑)"
+            if swing_is_idle:
+                style_label = "🔥 동시 가동 (스캘핑 가동 중 / 스윙 대기)"
+            else:
+                style_label = "🔥 동시 가동 (스윙+스캘핑)"
         else:
             style_label = "📊 듀얼 스윙 (4h 봉)"
 
         # ── 컬러·제목 결정 ────────────────────────────────────────────
         color = discord.Color.blue() if total > 0 else discord.Color.greyple()
 
-        # ── 설명 문구 ─────────────────────────────────────────────────
+        # ── 설명 문구 (관망 시 스윙 대기 여부 반영) ──────────────────
         parts: list[str] = []
         if total_real  > 0: parts.append(f"실전 **{total_real}건**")
         if total_paper > 0: parts.append(f"모의 **{total_paper}건**")
 
         if parts:
             desc = " + ".join(parts) + " 처리"
+        elif swing_is_idle:
+            # BOTH 모드 비스윙 시각 전용 관망 문구
+            if is_real_active and is_paper_active:
+                desc = "실전·모의투자 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+            elif is_real_active:
+                desc = "실전 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+            else:
+                desc = "모의투자 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
         elif is_real_active and is_paper_active:
             desc = "실전·모의투자 전액 현금 관망 중 (돌파/역추세 타점 부재)"
         elif is_real_active:
@@ -1051,10 +1071,24 @@ class AIFundManagerTask(commands.Cog):
             color=color,
         )
 
-        # ── AI 시장 분석 요약 ─────────────────────────────────────────
+        # ── AI 시장 분석 요약 (BOTH + 비스윙 시각이면 대기 안내 추가) ─
+        # BOTH 모드이고 스윙 시간대가 아니면, 스캘핑 분석 결과만 있으므로
+        # 유저가 "스윙 고장?" 오해하지 않도록 명시적 안내 문구를 붙인다.
+        _summary_display = market_summary or "분석 결과를 가져오지 못했습니다."
+        if swing_is_idle:
+            _swing_idle_notice = (
+                "💤 **스윙 엔진**: 현재 캔들 형성 대기 중 "
+                "(다음 4h 분석 시각에 가동)"
+            )
+            _summary_display = (
+                _summary_display + "\n\n" + _swing_idle_notice
+                if market_summary
+                else _swing_idle_notice
+            )
+
         embed.add_field(
             name="📊 AI 시장 분석 요약",
-            value=market_summary or "분석 결과를 가져오지 못했습니다.",
+            value=_summary_display,
             inline=False,
         )
 
@@ -1160,11 +1194,15 @@ class AIFundManagerTask(commands.Cog):
                     inline=False,
                 )
 
-            # 실전 완전 관망
+            # 실전 완전 관망 (엔진 상태에 따라 안내 문구 분기)
             if not real_bought and not real_reviewed:
+                if swing_is_idle:
+                    _watch_msg = "전액 현금 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                else:
+                    _watch_msg = "전액 현금 관망 중 (추세 돌파·낙폭 반등 모두 진입 조건 미달)"
                 embed.add_field(
                     name="💼 실전 AI",
-                    value="전액 현금 관망 중 (추세 돌파·낙폭 반등 모두 진입 조건 미달)",
+                    value=_watch_msg,
                     inline=False,
                 )
 
@@ -1258,11 +1296,15 @@ class AIFundManagerTask(commands.Cog):
                     inline=False,
                 )
 
-            # 모의 완전 관망
+            # 모의 완전 관망 (엔진 상태에 따라 안내 문구 분기)
             if not paper_bought and not paper_reviewed:
+                if swing_is_idle:
+                    _paper_watch_msg = "전액 가상 현금 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                else:
+                    _paper_watch_msg = "전액 가상 현금 관망 중 (추세 돌파·낙폭 반등 모두 진입 조건 미달)"
                 embed.add_field(
                     name="🎮 모의투자",
-                    value="전액 가상 현금 관망 중 (추세 돌파·낙폭 반등 모두 진입 조건 미달)",
+                    value=_paper_watch_msg,
                     inline=False,
                 )
 
