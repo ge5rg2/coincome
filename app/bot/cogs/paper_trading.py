@@ -353,15 +353,11 @@ class PaperSwingSettingsModal(discord.ui.Modal, title="🎮 [모의] [단독] �
                 user.virtual_krw = float(budget)
                 auto_refilled = True
 
-            # 단독 모드: 스캘핑·메이저 엔진 강제 OFF
+            # 모의 SWING 단독: ai_engine_mode="SWING"으로 제어 — 실전 플래그(is_major_enabled 등)는 건드리지 않음
             user.ai_paper_mode_enabled = True
             user.ai_engine_mode = "SWING"
             user.ai_swing_budget_krw = budget
             user.ai_swing_weight_pct = weight
-            user.ai_scalp_budget_krw = 0
-            user.ai_scalp_weight_pct = 0
-            user.is_major_enabled = False
-            user.major_budget = 0
             user.ai_max_coins = max_coins
             await db.commit()
             final_virtual_krw = float(user.virtual_krw)
@@ -497,15 +493,11 @@ class PaperScalpSettingsModal(discord.ui.Modal, title="🎮 [모의] [단독] �
                 user.virtual_krw = float(budget)
                 auto_refilled = True
 
-            # 단독 모드: 스윙·메이저 엔진 강제 OFF
+            # 모의 SCALPING 단독: ai_engine_mode="SCALPING"으로 제어 — 실전 플래그는 건드리지 않음
             user.ai_paper_mode_enabled = True
             user.ai_engine_mode = "SCALPING"
             user.ai_scalp_budget_krw = budget
             user.ai_scalp_weight_pct = weight
-            user.ai_swing_budget_krw = 0
-            user.ai_swing_weight_pct = 0
-            user.is_major_enabled = False
-            user.major_budget = 0
             user.ai_max_coins = max_coins
             await db.commit()
             final_virtual_krw = float(user.virtual_krw)
@@ -666,14 +658,13 @@ class PaperAllEnginesModal(discord.ui.Modal, title="🎮 [모의] [통합] 3엔�
                 user.virtual_krw = float(total_budget)
                 auto_refilled = True
 
-            # 3엔진 동시 활성화
+            # 모의 3엔진 동시 활성화: ai_engine_mode="ALL"로 제어 — is_major_enabled는 실전 전용 플래그, 건드리지 않음
             user.ai_paper_mode_enabled = True
             user.ai_engine_mode = "ALL"
             user.ai_swing_budget_krw = swing_budget
             user.ai_swing_weight_pct = ratio
             user.ai_scalp_budget_krw = scalp_budget
             user.ai_scalp_weight_pct = ratio
-            user.is_major_enabled = True
             user.major_budget = major_budget_val
             user.major_trade_ratio = ratio
             user.ai_max_coins = max_coins
@@ -826,8 +817,9 @@ class PaperMajorSettingsModal(discord.ui.Modal, title="🎮 [모의투자] 메�
                 user.virtual_krw = float(budget)
                 auto_refilled = True
 
+            # 모의 MAJOR 단독: ai_engine_mode="MAJOR"으로 제어 — is_major_enabled는 실전 전용 플래그, 건드리지 않음
             user.ai_paper_mode_enabled = True
-            user.is_major_enabled = True
+            user.ai_engine_mode = "MAJOR"
             user.major_budget = budget
             user.major_trade_ratio = ratio
             user.ai_max_coins = max_coins
@@ -930,13 +922,12 @@ class PaperTradingCog(commands.Cog):
         scalp_weight = int(getattr(user, "ai_scalp_weight_pct", 20) or 20)
         major_budget = int(getattr(user, "major_budget", 0) or 0)
         major_ratio  = int(getattr(user, "major_trade_ratio", 10) or 10)
-        is_major_on  = bool(getattr(user, "is_major_enabled", False))
         paper_on     = bool(user.ai_paper_mode_enabled)
 
-        # 엔진별 ON/OFF 판단
+        # 엔진별 ON/OFF 판단 (모의투자는 is_major_enabled 무관 — ai_engine_mode 기준)
         swing_on  = paper_on and engine_mode in ("SWING", "ALL") and swing_budget > 0
         scalp_on  = paper_on and engine_mode in ("SCALPING", "ALL") and scalp_budget > 0
-        major_on  = (is_major_on or (paper_on and engine_mode in ("MAJOR", "ALL"))) and major_budget > 0
+        major_on  = paper_on and engine_mode in ("MAJOR", "ALL") and major_budget > 0
 
         overall_status = "🟢 활성화" if paper_on else "⏸️ 비활성화"
 
