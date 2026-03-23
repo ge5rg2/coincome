@@ -44,6 +44,9 @@ import datetime
 import logging
 from zoneinfo import ZoneInfo
 
+import ccxt
+import pandas as pd
+
 import discord
 from discord.ext import commands, tasks
 from sqlalchemy import and_, or_, select
@@ -78,6 +81,12 @@ _LOOP_TIMES: list[datetime.time] = [
 # app/utils/time.py 의 _SWING_SCHEDULE_HOURS 와 반드시 동기화 유지
 _SWING_HOURS: frozenset[int] = frozenset({1, 5, 9, 13, 17, 21})
 
+# MAJOR 트렌드 캐처 타겟 유니버스 (ALT 블랙리스트와 동일 종목)
+_MAJOR_TARGETS: list[str] = [
+    "BTC/KRW", "ETH/KRW", "XRP/KRW", "SOL/KRW",
+    "DOGE/KRW", "ADA/KRW", "SUI/KRW", "PEPE/KRW",
+]
+
 
 class AIFundManagerTask(commands.Cog):
     """매시간 포지션 리뷰·신규 매수·DM 통합 리포트를 수행하는 백그라운드 Cog.
@@ -92,6 +101,7 @@ class AIFundManagerTask(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.ai_service = AITraderService()
+        self._public_exchange = ccxt.upbit({"enableRateLimit": True})
         self.fund_loop.start()
 
     def cog_unload(self) -> None:
@@ -420,7 +430,7 @@ class AIFundManagerTask(commands.Cog):
             )
             if swing_analysis.get("market_summary"):
                 market_summaries.append(
-                    f"**📊 [스윙 엔진 분석]**\n{swing_analysis['market_summary']}"
+                    f"**📊 [알트 스윙 엔진 분석]**\n{swing_analysis['market_summary']}"
                 )
             swing_picks: list[dict] = swing_analysis.get("picks", [])
 
@@ -500,7 +510,7 @@ class AIFundManagerTask(commands.Cog):
             )
             if scalp_analysis.get("market_summary"):
                 market_summaries.append(
-                    f"**⚡ [스캘핑 엔진 분석]**\n{scalp_analysis['market_summary']}"
+                    f"**⚡ [알트 스캘핑 엔진 분석]**\n{scalp_analysis['market_summary']}"
                 )
             scalp_picks: list[dict] = scalp_analysis.get("picks", [])
 
@@ -547,6 +557,92 @@ class AIFundManagerTask(commands.Cog):
                 )
             elif is_paper_active:
                 logger.info("모의 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+        # ── Step 3-c: MAJOR 트렌드 캐처 엔진 (스윙 시간대 전용, is_major_enabled=True) ──
+        is_major_on: bool = bool(getattr(user, "is_major_enabled", False))
+        if is_major_on and is_swing_hour:
+            major_budget = float(getattr(user, "major_budget", 0))
+            major_ratio  = float(getattr(user, "major_trade_ratio", 10))
+
+            # 기계적 3중 필터(EMA200 + 정배열 + BB상단 돌파) → 통과 종목만 AI로 전달
+            major_market_data: dict[str, dict] = {}
+            for _msym in _MAJOR_TARGETS:
+                _mdata = await self._check_major_filter(_msym)
+                if _mdata is not None:
+                    major_market_data[_msym] = _mdata
+                await asyncio.sleep(0.3)  # ccxt rate-limit 방어
+
+            if major_market_data:
+                # MAJOR 예산: major_budget=0이면 무제한(전체 KRW 기준 ratio%)
+                major_krw_base        = actual_krw if major_budget == 0 else min(actual_krw, major_budget)
+                major_real_available  = (major_krw_base * major_ratio / 100) if is_real_active  else 0.0
+                major_paper_available = (float(user.virtual_krw) * major_ratio / 100) if is_paper_active else 0.0
+
+                major_analysis = await self.ai_service.analyze_market(
+                    major_market_data,
+                    holding_symbols,
+                    engine_type="MAJOR_TREND",
+                    weight_pct=major_ratio,
+                    available_krw=max(major_real_available, major_paper_available),
+                )
+                if major_analysis.get("market_summary"):
+                    market_summaries.append(
+                        f"**🏦 [메이저 트렌드 분석]**\n{major_analysis['market_summary']}"
+                    )
+                major_picks: list[dict] = major_analysis.get("picks", [])
+
+                if is_real_active and real_slots > 0 and major_picks:
+                    await self._buy_new_coins(
+                        user=user,
+                        picks=major_picks,
+                        exchange=exchange,
+                        ws_manager=ws_manager,
+                        registry=registry,
+                        bought_positions=real_bought,
+                        market_data=major_market_data,
+                        is_paper_mode=False,
+                        available_krw=major_real_available,
+                        max_slots=real_slots,
+                        engine_type="MAJOR_TREND",
+                    )
+                elif is_real_active and real_slots <= 0:
+                    logger.info(
+                        "최대 보유 종목 도달로 실전 MAJOR 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
+                        len(real_running), user.ai_max_coins, user_id,
+                    )
+                elif is_real_active:
+                    logger.info("실전 MAJOR AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+                if is_paper_active and paper_slots > 0 and major_picks:
+                    await self._buy_new_coins(
+                        user=user,
+                        picks=major_picks,
+                        exchange=None,
+                        ws_manager=ws_manager,
+                        registry=registry,
+                        bought_positions=paper_bought,
+                        market_data=major_market_data,
+                        is_paper_mode=True,
+                        available_krw=major_paper_available,
+                        max_slots=paper_slots,
+                        engine_type="MAJOR_TREND",
+                    )
+                elif is_paper_active and paper_slots <= 0:
+                    logger.info(
+                        "[모의] 최대 보유 종목 도달로 MAJOR 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
+                        len(paper_running), user.ai_max_coins, user_id,
+                    )
+                elif is_paper_active:
+                    logger.info("모의 MAJOR AI 신규 픽 없음 (관망): user_id=%s", user_id)
+
+                # 슬롯 업데이트 (MAJOR 매수 후 중복 방지)
+                real_slots  -= sum(1 for b in real_bought  if (b.get("engine_type") or "").upper() == "MAJOR_TREND")
+                paper_slots -= sum(1 for b in paper_bought if (b.get("engine_type") or "").upper() == "MAJOR_TREND")
+                holding_symbols |= {b["symbol"] for b in real_bought + paper_bought}
+            else:
+                logger.info(
+                    "MAJOR 3중 필터 통과 종목 없음 (관망): user_id=%s", user_id,
+                )
 
         # ── Step 4: 통합 DM Embed 발송 ───────────────────────────────
         # BOTH 모드에서 두 엔진 요약이 모두 있을 때 구분선으로 명확히 분리한다.
@@ -981,6 +1077,111 @@ class AIFundManagerTask(commands.Cog):
             await asyncio.sleep(0.5)
 
     # ------------------------------------------------------------------
+    # MAJOR 기계적 3중 필터
+    # ------------------------------------------------------------------
+
+    async def _check_major_filter(self, symbol: str) -> dict | None:
+        """기계적 3중 필터로 MAJOR 종목의 진입 가능 여부를 판단한다.
+
+        조건:
+          1. Close > EMA200  (장기 추세 상방)
+          2. EMA20 > EMA50   (정배열)
+          3. Close > BB Upper(20, 2.0σ)  (상단 돌파)
+
+        Args:
+            symbol: 심볼 (예: "BTC/KRW")
+
+        Returns:
+            통과 시: {price, ema200, ema20, ema50, bb_upper, rsi4h, vol_ratio, volume_krw}
+            미통과 시: None
+        """
+        try:
+            # 220개 4h 봉 fetch (EMA200 안정 수렴 최소 요건)
+            loop = asyncio.get_event_loop()
+            ohlcv: list = await loop.run_in_executor(
+                None,
+                lambda: self._public_exchange.fetch_ohlcv(symbol, "4h", limit=220),
+            )
+            if not ohlcv or len(ohlcv) < 50:
+                logger.warning(
+                    "MAJOR 필터: OHLCV 데이터 부족 (%d봉): %s", len(ohlcv or []), symbol
+                )
+                return None
+
+            df = pd.DataFrame(
+                ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"]
+            )
+            df["close"]  = df["close"].astype(float)
+            df["volume"] = df["volume"].astype(float)
+
+            # EMA 계산
+            df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
+            df["ema20"]  = df["close"].ewm(span=20,  adjust=False).mean()
+            df["ema50"]  = df["close"].ewm(span=50,  adjust=False).mean()
+
+            # BB Upper (SMA20 + 2.0σ)
+            df["sma20"]    = df["close"].rolling(20).mean()
+            df["std20"]    = df["close"].rolling(20).std()
+            df["bb_upper"] = df["sma20"] + 2.0 * df["std20"]
+
+            # RSI 14 (4h)
+            delta = df["close"].diff()
+            gain  = delta.clip(lower=0)
+            loss  = (-delta).clip(lower=0)
+            avg_g = gain.ewm(span=14, adjust=False).mean()
+            avg_l = loss.ewm(span=14, adjust=False).mean()
+            rs    = avg_g / avg_l.replace(0, float("nan"))
+            df["rsi"] = 100 - (100 / (1 + rs))
+
+            # 거래량 비율 (최근 봉 / 최근 20봉 평균)
+            df["vol_ma20"]  = df["volume"].rolling(20).mean()
+            df["vol_ratio"] = df["volume"] / df["vol_ma20"]
+
+            latest   = df.iloc[-1]
+            close    = float(latest["close"])
+            ema200   = float(latest["ema200"])
+            ema20    = float(latest["ema20"])
+            ema50    = float(latest["ema50"])
+            bb_upper = float(latest["bb_upper"])
+            rsi4h    = float(latest["rsi"])
+            vol_ratio = float(latest["vol_ratio"])
+
+            # 3중 필터 검사
+            pass_ema200    = close > ema200
+            pass_align     = ema20 > ema50
+            pass_bb_break  = close > bb_upper
+
+            logger.info(
+                "MAJOR 필터: %s  close=%.0f ema200=%.0f ema20=%.0f ema50=%.0f "
+                "bb_upper=%.0f | EMA200=%s 정배열=%s BB돌파=%s",
+                symbol, close, ema200, ema20, ema50, bb_upper,
+                "✅" if pass_ema200   else "❌",
+                "✅" if pass_align    else "❌",
+                "✅" if pass_bb_break else "❌",
+            )
+
+            if not (pass_ema200 and pass_align and pass_bb_break):
+                return None
+
+            # 24h 거래대금 추산 (최근 6봉 × 4h = 24h)
+            vol_krw_24h = float(df["volume"].iloc[-6:].sum() * close)
+
+            return {
+                "price":      close,
+                "ema200":     ema200,
+                "ema20":      ema20,
+                "ema50":      ema50,
+                "bb_upper":   bb_upper,
+                "rsi4h":      rsi4h,
+                "vol_ratio":  vol_ratio,
+                "volume_krw": vol_krw_24h,
+            }
+
+        except Exception as exc:
+            logger.error("MAJOR 필터 오류 (%s): %s", symbol, exc)
+            return None
+
+    # ------------------------------------------------------------------
     # Step 6: 통합 리포트 Embed 빌드
     # ------------------------------------------------------------------
 
@@ -1033,16 +1234,16 @@ class AIFundManagerTask(commands.Cog):
 
         # ── 엔진 모드 레이블 ──────────────────────────────────────────
         if engine_mode == "SCALPING":
-            style_label = "⚡ 스캘핑 (1h 봉)"
+            style_label = "⚡ 알트 스캘핑 (1h 봉)"
         elif engine_mode == "BOTH":
             if swing_is_idle:
-                style_label = "🔥 동시 가동 (스캘핑 가동 중 / 스윙 대기)"
+                style_label = "🔥 동시 가동 (알트 스캘핑 가동 중 / 알트 스윙 대기)"
             else:
-                style_label = "🔥 동시 가동 (스윙+스캘핑)"
+                style_label = "🔥 동시 가동 (알트 스윙+알트 스캘핑)"
         elif engine_mode == "MAJOR":
             style_label = "🏦 메이저 트렌드 (4h EMA200 필터)"
         else:
-            style_label = "📊 듀얼 스윙 (4h 봉)"
+            style_label = "📊 알트 스윙 (4h 봉)"
 
         # ── 컬러·제목 결정 ────────────────────────────────────────────
         color = discord.Color.blue() if total > 0 else discord.Color.greyple()
@@ -1057,11 +1258,11 @@ class AIFundManagerTask(commands.Cog):
         elif swing_is_idle:
             # BOTH 모드 비스윙 시각 전용 관망 문구
             if is_real_active and is_paper_active:
-                desc = "실전·모의투자 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                desc = "실전·모의투자 관망 중 (알트 스캘핑 진입 조건 미달, 알트 스윙은 대기 중)"
             elif is_real_active:
-                desc = "실전 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                desc = "실전 관망 중 (알트 스캘핑 진입 조건 미달, 알트 스윙은 대기 중)"
             else:
-                desc = "모의투자 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                desc = "모의투자 관망 중 (알트 스캘핑 진입 조건 미달, 알트 스윙은 대기 중)"
         elif is_real_active and is_paper_active:
             desc = "실전·모의투자 전액 현금 관망 중 (돌파/역추세 타점 부재)"
         elif is_real_active:
@@ -1083,7 +1284,7 @@ class AIFundManagerTask(commands.Cog):
         _summary_display = market_summary or "분석 결과를 가져오지 못했습니다."
         if swing_is_idle:
             _swing_idle_notice = (
-                "💤 **스윙 엔진**: 현재 캔들 형성 대기 중 "
+                "💤 **알트 스윙 엔진**: 현재 캔들 형성 대기 중 "
                 "(다음 4h 분석 시각에 가동)"
             )
             _summary_display = (
@@ -1122,13 +1323,13 @@ class AIFundManagerTask(commands.Cog):
         # ── 엔진 태그 헬퍼 (trade_style → 섹션 레이블) ──────────────
         def _engine_tag(item: dict, paper: bool = False) -> str:
             """trade_style 기준으로 엔진 태그를 반환한다."""
-            style = (item.get("trade_style") or "").upper()
+            style = (item.get("trade_style") or item.get("engine_type") or "").upper()
             prefix = "[🎮모의] " if paper else ""
-            if style == "SCALPING":
-                return f"{prefix}⚡ [스캘핑]"
-            if style == "MAJOR":
-                return f"{prefix}🏦 [MAJOR]"
-            return f"{prefix}📊 [스윙]"
+            if style in ("SCALPING", "BEAST"):
+                return f"{prefix}⚡ [알트 스캘핑]"
+            if style in ("MAJOR", "MAJOR_TREND"):
+                return f"{prefix}🏦 [메이저]"
+            return f"{prefix}📊 [알트 스윙]"
 
         # ════════════════════════════════════════════════════════════
         # 실전 AI 섹션
@@ -1219,7 +1420,7 @@ class AIFundManagerTask(commands.Cog):
             # 실전 완전 관망 (엔진 상태에 따라 안내 문구 분기)
             if not real_bought and not real_reviewed:
                 if swing_is_idle:
-                    _watch_msg = "전액 현금 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                    _watch_msg = "전액 현금 관망 중 (알트 스캘핑 진입 조건 미달, 알트 스윙은 대기 중)"
                 else:
                     _watch_msg = "전액 현금 관망 중 (추세 돌파·낙폭 반등 모두 진입 조건 미달)"
                 embed.add_field(
@@ -1320,7 +1521,7 @@ class AIFundManagerTask(commands.Cog):
             # 모의 완전 관망 (엔진 상태에 따라 안내 문구 분기)
             if not paper_bought and not paper_reviewed:
                 if swing_is_idle:
-                    _paper_watch_msg = "전액 가상 현금 관망 중 (스캘핑 진입 조건 미달, 스윙은 대기 중)"
+                    _paper_watch_msg = "전액 가상 현금 관망 중 (알트 스캘핑 진입 조건 미달, 알트 스윙은 대기 중)"
                 else:
                     _paper_watch_msg = "전액 가상 현금 관망 중 (추세 돌파·낙폭 반등 모두 진입 조건 미달)"
                 embed.add_field(
