@@ -460,7 +460,7 @@ class SettingsCog(commands.Cog):
         except Exception as exc:
             logger.error("업비트 KRW 마켓 캐시 실패 (autocomplete 비활성): %s", exc)
 
-    @app_commands.command(name="설정", description="코인 자동 매매를 설정합니다.")
+    @app_commands.command(name="수동매매세팅", description="코인별 수동 자동 매매를 설정합니다. (매수금액·익절·손절 설정)")
     @app_commands.describe(coin="매매할 코인을 검색하세요 (한글명·영문명·심볼 모두 지원)")
     @app_commands.autocomplete(coin=coin_autocomplete)
     async def settings_command(
