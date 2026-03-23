@@ -152,7 +152,7 @@ class AISettingView(discord.ui.View):
 
     Attributes:
         mode_value:   현재 선택된 AI 모드 ("ON" / "OFF").
-        engine_value: 현재 선택된 엔진 ("SWING" / "SCALPING" / "BOTH").
+        engine_value: 현재 선택된 엔진 ("SWING" / "SCALPING" / "MAJOR" / "ALL").
     """
 
     def __init__(self, user: User) -> None:

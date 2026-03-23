@@ -1218,7 +1218,7 @@ class AIFundManagerTask(commands.Cog):
         - 실전 항목: 일반 표기
         - 모의 항목: [🎮모의] 태그 명시
         - 두 모드 모두 없거나 관망이면 중립 색상
-        - BOTH 모드에서 스윙 비가동 시각이면 스윙 엔진 대기 중 안내 추가
+        - ALL 모드에서 스윙 비가동 시각이면 스윙·메이저 엔진 대기 중 안내 추가
 
         Args:
             market_summary:        AI가 생성한 시장 전반 분석 요약.
@@ -1228,12 +1228,12 @@ class AIFundManagerTask(commands.Cog):
             paper_bought:          모의 신규 매수 결과 리스트.
             is_real_active:        이번 사이클에서 실전 모드가 활성 상태였는지.
             is_paper_active:       이번 사이클에서 모의 모드가 활성 상태였는지.
-            engine_mode:           "SWING" / "SCALPING" / "BOTH" — 제목/푸터에 표시.
+            engine_mode:           "SWING" / "SCALPING" / "MAJOR" / "ALL" — 제목/푸터에 표시.
             ai_max_coins:          유저 설정 최대 동시 보유 종목 수.
             real_position_count:   이번 사이클 후 실전 보유 종목 수 (기존 + 신규).
             paper_position_count:  이번 사이클 후 모의 보유 종목 수 (기존 + 신규).
             is_swing_hour:         현재 KST 시각이 4h 봉 마감 시각인지 여부
-                                   (BOTH 모드 스윙 엔진 대기 안내에 사용).
+                                   (ALL 모드 스윙·메이저 엔진 대기 안내에 사용).
 
         Returns:
             단일 discord.Embed 객체.
@@ -1291,8 +1291,8 @@ class AIFundManagerTask(commands.Cog):
             color=color,
         )
 
-        # ── AI 시장 분석 요약 (BOTH + 비스윙 시각이면 대기 안내 추가) ─
-        # BOTH 모드이고 스윙 시간대가 아니면, 스캘핑 분석 결과만 있으므로
+        # ── AI 시장 분석 요약 (ALL + 비스윙 시각이면 대기 안내 추가) ─
+        # ALL 모드이고 스윙 시간대가 아니면, 스캘핑 분석 결과만 있으므로
         # 유저가 "스윙 고장?" 오해하지 않도록 명시적 안내 문구를 붙인다.
         _summary_display = market_summary or "분석 결과를 가져오지 못했습니다."
         if swing_is_idle:
@@ -1544,7 +1544,7 @@ class AIFundManagerTask(commands.Cog):
                 )
 
         # ── 푸터: 다음 실행 시각 (투자 성향 반영) ────────────────────
-        _style_for_next = "SCALPING" if engine_mode in ("SCALPING", "BOTH") else "SWING"
+        _style_for_next = "SCALPING" if engine_mode in ("SCALPING", "ALL", "BOTH") else "SWING"
         next_time = get_next_run_time_for_style(_style_for_next)
         footer_parts: list[str] = []
         if is_real_active:  footer_parts.append("실전")
