@@ -138,7 +138,7 @@ class PaperSettingView(discord.ui.View):
 
     Attributes:
         mode_value:   현재 선택된 AI 모드 ("ON" / "OFF").
-        engine_value: 현재 선택된 엔진 ("SWING" / "SCALPING" / "BOTH").
+        engine_value: 현재 선택된 엔진 ("SWING" / "SCALPING" / "MAJOR" / "ALL").
     """
 
     def __init__(self, user: User) -> None:
@@ -917,51 +917,58 @@ class PaperTradingCog(commands.Cog):
                 await db.commit()
                 await db.refresh(user)
 
-        # 현재 엔진 모드 파악
+        # 현재 엔진 모드 파악 (BOTH → ALL 레거시 마이그레이션)
         engine_mode = (getattr(user, "ai_engine_mode", None) or "SWING").upper()
-        if engine_mode not in ("SWING", "SCALPING", "BOTH", "MAJOR"):
+        if engine_mode == "BOTH":
+            engine_mode = "ALL"
+        if engine_mode not in ("SWING", "SCALPING", "MAJOR", "ALL"):
             engine_mode = "SWING"
 
-        _ENGINE_LABELS = {
-            "SWING": "📊 알트 스윙 (4h)",
-            "SCALPING": "⚡ 알트 스캘핑 (1h)",
-            "BOTH": "🔥 동시 가동 (알트 스윙+알트 스캘핑)",
-            "MAJOR": "🏦 메이저 트렌드",
-        }
-        engine_label = _ENGINE_LABELS.get(engine_mode, engine_mode)
-
-        swing_budget = int(getattr(user, "ai_swing_budget_krw", 1_000_000) or 1_000_000)
+        swing_budget = int(getattr(user, "ai_swing_budget_krw", 0) or 0)
         swing_weight = int(getattr(user, "ai_swing_weight_pct", 20) or 20)
-        scalp_budget = int(getattr(user, "ai_scalp_budget_krw", 1_000_000) or 1_000_000)
+        scalp_budget = int(getattr(user, "ai_scalp_budget_krw", 0) or 0)
         scalp_weight = int(getattr(user, "ai_scalp_weight_pct", 20) or 20)
+        major_budget = int(getattr(user, "major_budget", 0) or 0)
+        major_ratio  = int(getattr(user, "major_trade_ratio", 10) or 10)
+        is_major_on  = bool(getattr(user, "is_major_enabled", False))
+        paper_on     = bool(user.ai_paper_mode_enabled)
+
+        # 엔진별 ON/OFF 판단
+        swing_on  = paper_on and engine_mode in ("SWING", "ALL") and swing_budget > 0
+        scalp_on  = paper_on and engine_mode in ("SCALPING", "ALL") and scalp_budget > 0
+        major_on  = (is_major_on or (paper_on and engine_mode in ("MAJOR", "ALL"))) and major_budget > 0
+
+        overall_status = "🟢 활성화" if paper_on else "⏸️ 비활성화"
+
+        def _engine_status_line(on: bool, budget: int, ratio: int) -> str:
+            if on and budget > 0:
+                return f"🟢 ON | 가상 예산: **{budget:,} KRW** (진입 비중 **{ratio}%**)"
+            return "⏸️ OFF | 미설정 (가동 중지)"
 
         embed = discord.Embed(
-            title="🎮 AI 모의투자 설정 (V2)",
+            title="🎮 AI 모의투자 설정 대시보드 (V2)",
             description=(
-                "드롭다운에서 **AI 모드**와 **가동 엔진**을 선택한 뒤\n"
-                "**⚙️ 다음 →** 버튼을 눌러 가상 예산과 비중을 입력하세요.\n"
-                "API 키 없이 **가상 잔고**로 AI 전략을 체험할 수 있습니다."
+                "아래 드롭다운에서 가동할 **엔진 모드**를 선택하세요.\n"
+                "*(단독 모드 선택 시 다른 엔진은 자동으로 OFF 됩니다)*"
             ),
-            color=discord.Color.purple(),
+            color=discord.Color.purple() if paper_on else discord.Color.greyple(),
         )
-        current_value_lines = [
-            f"AI 모의투자: **{'ON' if user.ai_paper_mode_enabled else 'OFF'}**",
-            f"가동 엔진: **{engine_label}**",
-        ]
-        if engine_mode in ("SWING", "BOTH"):
-            current_value_lines.append(
-                f"📊 알트 스윙 설정: **{swing_budget:,} KRW** / **{swing_weight}%**"
-            )
-        if engine_mode in ("SCALPING", "BOTH"):
-            current_value_lines.append(
-                f"⚡ 알트 스캘핑 설정: **{scalp_budget:,} KRW** / **{scalp_weight}%**"
-            )
-        current_value_lines.append(f"최대 종목: **{user.ai_max_coins}개**")
-        current_value_lines.append(f"💰 가상 잔고: **{float(user.virtual_krw):,.0f} KRW**")
-
+        embed.add_field(name="🔹 현재 상태", value=overall_status, inline=True)
+        embed.add_field(name="🔹 최대 보유 종목", value=f"**{user.ai_max_coins}개**", inline=True)
+        embed.add_field(name="💰 가상 잔고", value=f"**{float(user.virtual_krw):,.0f} KRW**", inline=True)
         embed.add_field(
-            name="현재 설정",
-            value="\n".join(current_value_lines),
+            name="⚙️ [엔진 1] 알트 스윙 (4h)",
+            value=_engine_status_line(swing_on, swing_budget, swing_weight),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚙️ [엔진 2] 알트 스캘핑 (1h)",
+            value=_engine_status_line(scalp_on, scalp_budget, scalp_weight),
+            inline=False,
+        )
+        embed.add_field(
+            name="⚙️ [엔진 3] 메이저 트렌드 (4h)",
+            value=_engine_status_line(major_on, major_budget, major_ratio),
             inline=False,
         )
         embed.set_footer(text="⏱️ 이 메시지는 3분 후 만료됩니다.")
@@ -1238,16 +1245,18 @@ class PaperTradingCog(commands.Cog):
         paper_total_asset = virtual_krw + paper_coin_invested + paper_unrealized_pnl
 
         # 동적 초기 시드: 현재 활성화된 엔진 예산 합산 (V2 다중 엔진 지원)
-        # SWING 또는 BOTH → ai_swing_budget_krw 포함
-        # SCALPING 또는 BOTH → ai_scalp_budget_krw 포함
-        # is_major_enabled → major_budget 포함
+        # SWING 또는 ALL → ai_swing_budget_krw 포함
+        # SCALPING 또는 ALL → ai_scalp_budget_krw 포함
+        # MAJOR 또는 ALL (또는 is_major_enabled) → major_budget 포함
         _active_engine = (getattr(user, "ai_engine_mode", "SWING") or "SWING").upper()
+        if _active_engine == "BOTH":
+            _active_engine = "ALL"
         _paper_initial_seed: int = 0
-        if _active_engine in ("SWING", "BOTH"):
+        if _active_engine in ("SWING", "ALL"):
             _paper_initial_seed += int(getattr(user, "ai_swing_budget_krw", 0) or 0)
-        if _active_engine in ("SCALPING", "BOTH"):
+        if _active_engine in ("SCALPING", "ALL"):
             _paper_initial_seed += int(getattr(user, "ai_scalp_budget_krw", 0) or 0)
-        if getattr(user, "is_major_enabled", False):
+        if _active_engine in ("MAJOR", "ALL") or getattr(user, "is_major_enabled", False):
             _paper_initial_seed += int(getattr(user, "major_budget", 0) or 0)
         # 설정된 예산이 없으면 _INITIAL_VIRTUAL_KRW(1,000만) 폴백
         paper_initial_seed = float(_paper_initial_seed) if _paper_initial_seed > 0 else _INITIAL_VIRTUAL_KRW
