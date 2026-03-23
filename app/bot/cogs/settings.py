@@ -636,6 +636,7 @@ class SettingsCog(commands.Cog):
         embed.add_field(
             name="📊 알트 스윙 (4h 봉) — `/ai실전` or `/ai모의`",
             value=(
+                "낙폭 과대 및 추세 돌파를 노리는 양방향 스윙. **(알트코인 전용)**\n"
                 "**대상**: 업비트 KRW 상위 알트코인 (메이저 제외)\n"
                 "**실행**: 01·05·09·13·17·21시 KST (6회/일, 4h 봉 기준)\n"
                 "**전략 A** 추세 돌파 — MA50 상승 & RSI 55~70 → 익절 **6%** / 손절 **4%**\n"
@@ -648,6 +649,7 @@ class SettingsCog(commands.Cog):
         embed.add_field(
             name="⚡ 알트 스캘핑 (1h 봉) — `/ai실전` or `/ai모의`",
             value=(
+                "상승 모멘텀에 올라타는 짧은 단타. **(알트코인 전용)**\n"
                 "**대상**: 업비트 KRW 상위 알트코인 (메이저 제외)\n"
                 "**실행**: 매시 정각 (24회/일, 1h 봉 기준)\n"
                 "**진입 조건**: Close > MA20 AND RSI 60~75\n"
@@ -660,6 +662,7 @@ class SettingsCog(commands.Cog):
         embed.add_field(
             name="🏦 메이저 트렌드 (4h 봉) — `/ai실전` or `/ai모의`",
             value=(
+                "비트코인 등 무거운 코인의 강한 돌파 추세를 끝까지 발라먹는 전략. **(메이저 8종 전용)**\n"
                 "**대상**: BTC·ETH·XRP·SOL·DOGE·ADA·SUI·PEPE\n"
                 "**실행**: 스윙 시간대와 동일 (01·05·09·13·17·21시 KST)\n"
                 "**3중 필터**: Close > EMA200 AND EMA20 > EMA50 AND Close > BB Upper(2σ)\n"
