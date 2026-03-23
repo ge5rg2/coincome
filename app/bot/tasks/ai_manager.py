@@ -275,7 +275,8 @@ class AIFundManagerTask(commands.Cog):
         registry   = WorkerRegistry.get()
 
         # ── 활성 모드 결정 ────────────────────────────────────────────
-        # MAJOR 단독 모드: ai_mode_enabled=False지만 is_major_enabled=True이면 실전 활성
+        # is_major_enabled는 /ai실전 MAJOR 모달만 설정하므로 실전 MAJOR 판단에 사용.
+        # (paper 모달은 is_major_enabled를 건드리지 않음 — 오염 방지)
         is_real_active  = (
             user.subscription_tier == SubscriptionTier.VIP
             and (user.ai_mode_enabled or bool(getattr(user, "is_major_enabled", False)))
@@ -571,8 +572,17 @@ class AIFundManagerTask(commands.Cog):
             elif is_paper_active:
                 logger.info("모의 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-        # ── Step 3-c: MAJOR 트렌드 캐처 엔진 (스윙 시간대 전용, is_major_enabled=True) ──
-        is_major_on: bool = bool(getattr(user, "is_major_enabled", False))
+        # ── Step 3-c: MAJOR 트렌드 캐처 엔진 (스윙 시간대 전용) ──────
+        # 실전 MAJOR: is_major_enabled=True (오직 /ai실전 MAJOR 모달만 설정, paper 모달은 건드리지 않음)
+        # 모의 MAJOR: ai_paper_mode_enabled + engine_mode in ("MAJOR","ALL") + major_budget > 0
+        is_major_on_real: bool = bool(getattr(user, "is_major_enabled", False))
+        is_major_on_paper: bool = (
+            is_paper_active
+            and engine_mode in ("MAJOR", "ALL")
+            and float(getattr(user, "major_budget", 0) or 0) > 0
+        )
+        is_major_on: bool = is_major_on_real or is_major_on_paper
+
         if is_major_on and is_swing_hour:
             major_budget = float(getattr(user, "major_budget", 0))
             major_ratio  = float(getattr(user, "major_trade_ratio", 10))
@@ -586,10 +596,12 @@ class AIFundManagerTask(commands.Cog):
                 await asyncio.sleep(0.3)  # ccxt rate-limit 방어
 
             if major_market_data:
-                # MAJOR 예산: major_budget=0이면 무제한(전체 KRW 기준 ratio%)
-                major_krw_base        = actual_krw if major_budget == 0 else min(actual_krw, major_budget)
-                major_real_available  = (major_krw_base * major_ratio / 100) if is_real_active  else 0.0
-                major_paper_available = (float(user.virtual_krw) * major_ratio / 100) if is_paper_active else 0.0
+                # 실전 MAJOR 가용 예산 (is_major_on_real인 경우만)
+                major_krw_base       = actual_krw if major_budget == 0 else min(actual_krw, major_budget)
+                major_real_available = (major_krw_base * major_ratio / 100) if (is_real_active and is_major_on_real) else 0.0
+                # 모의 MAJOR 가용 예산: 가상 잔고 기준 major_budget 캡
+                major_paper_base     = float(user.virtual_krw) if major_budget == 0 else min(float(user.virtual_krw), major_budget)
+                major_paper_available = (major_paper_base * major_ratio / 100) if is_major_on_paper else 0.0
 
                 major_analysis = await self.ai_service.analyze_market(
                     major_market_data,
@@ -604,7 +616,8 @@ class AIFundManagerTask(commands.Cog):
                     )
                 major_picks: list[dict] = major_analysis.get("picks", [])
 
-                if is_real_active and real_slots > 0 and major_picks:
+                # ── 실전 MAJOR 매수 (is_major_on_real만) ──
+                if is_real_active and is_major_on_real and real_slots > 0 and major_picks:
                     await self._buy_new_coins(
                         user=user,
                         picks=major_picks,
@@ -618,15 +631,16 @@ class AIFundManagerTask(commands.Cog):
                         max_slots=real_slots,
                         engine_type="MAJOR_TREND",
                     )
-                elif is_real_active and real_slots <= 0:
+                elif is_real_active and is_major_on_real and real_slots <= 0:
                     logger.info(
                         "최대 보유 종목 도달로 실전 MAJOR 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                         len(real_running), user.ai_max_coins, user_id,
                     )
-                elif is_real_active:
+                elif is_real_active and is_major_on_real:
                     logger.info("실전 MAJOR AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-                if is_paper_active and paper_slots > 0 and major_picks:
+                # ── 모의 MAJOR 매수 (is_major_on_paper만) ──
+                if is_major_on_paper and paper_slots > 0 and major_picks:
                     await self._buy_new_coins(
                         user=user,
                         picks=major_picks,
@@ -640,12 +654,12 @@ class AIFundManagerTask(commands.Cog):
                         max_slots=paper_slots,
                         engine_type="MAJOR_TREND",
                     )
-                elif is_paper_active and paper_slots <= 0:
+                elif is_major_on_paper and paper_slots <= 0:
                     logger.info(
                         "[모의] 최대 보유 종목 도달로 MAJOR 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                         len(paper_running), user.ai_max_coins, user_id,
                     )
-                elif is_paper_active:
+                elif is_major_on_paper:
                     logger.info("모의 MAJOR AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
                 # 슬롯 업데이트 (MAJOR 매수 후 중복 방지)
