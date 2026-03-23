@@ -620,3 +620,68 @@ class SettingsCog(commands.Cog):
             embed.add_field(name=f"🪙 {s.symbol}", value=value, inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="도움말", description="AI 트레이딩 봇의 엔진별 전략과 사용 방법을 안내합니다.")
+    async def help_command(self, interaction: discord.Interaction) -> None:
+        """3개 AI 엔진(알트 스윙 / 알트 스캘핑 / 메이저 트렌드)의 전략 설명 Embed를 반환한다."""
+        embed = discord.Embed(
+            title="📖 AI 트레이딩 봇 도움말",
+            description=(
+                "CoinCome AI는 **3가지 독립 엔진**으로 구성됩니다.\n"
+                "각 엔진은 예산·비중이 분리되어 동시 가동이 가능합니다."
+            ),
+            color=discord.Color.blue(),
+        )
+
+        embed.add_field(
+            name="📊 알트 스윙 (4h 봉) — `/ai실전` or `/ai모의`",
+            value=(
+                "**대상**: 업비트 KRW 상위 알트코인 (메이저 제외)\n"
+                "**실행**: 01·05·09·13·17·21시 KST (6회/일, 4h 봉 기준)\n"
+                "**전략 A** 추세 돌파 — MA50 상승 & RSI 55~70 → 익절 **6%** / 손절 **4%**\n"
+                "**전략 B** 낙폭 반등 — MA50 하락 & RSI < 25 → 익절 **3%** / 손절 **2.5%**\n"
+                "→ BTC 국면에 따라 A/B 자동 전환 | AI Score 90점 이상만 진입"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="⚡ 알트 스캘핑 (1h 봉) — `/ai실전` or `/ai모의`",
+            value=(
+                "**대상**: 업비트 KRW 상위 알트코인 (메이저 제외)\n"
+                "**실행**: 매시 정각 (24회/일, 1h 봉 기준)\n"
+                "**진입 조건**: Close > MA20 AND RSI 60~75\n"
+                "**익절**: +2.0% / **손절**: -1.5% (R:R 1.33:1)\n"
+                "→ 단타 특성상 손절 타이트 | AI Score 90점 이상만 진입"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🏦 메이저 트렌드 (4h 봉) — `/ai실전` or `/ai모의`",
+            value=(
+                "**대상**: BTC·ETH·XRP·SOL·DOGE·ADA·SUI·PEPE\n"
+                "**실행**: 스윙 시간대와 동일 (01·05·09·13·17·21시 KST)\n"
+                "**3중 필터**: Close > EMA200 AND EMA20 > EMA50 AND Close > BB Upper(2σ)\n"
+                "**AI 판별**: 진짜 돌파 vs Fakeout (거래량·RSI·도지 여부)\n"
+                "**익절**: +4.0% / **손절**: -2.0% (R:R 2:1 하드 고정)\n"
+                "→ 알트 엔진과 독립 예산 | 블랙리스트 없음"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🔧 주요 명령어",
+            value=(
+                "`/ai실전` — VIP 전용 실전 AI 설정\n"
+                "`/ai모의` — 무료 AI 모의투자 설정 (API 키 불필요)\n"
+                "`/ai종료` — 실전 AI 연착륙 또는 즉시 종료\n"
+                "`/ai통계` — 모의투자 수익률 통계\n"
+                "`/수동매매세팅` — 코인별 수동 자동 매매 설정\n"
+                "`/잔고` — 현재 보유 포지션 및 수익률 확인"
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(text="AI 리포트는 매 실행 후 DM으로 자동 발송됩니다.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
