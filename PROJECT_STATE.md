@@ -955,7 +955,54 @@ v2 백테스트 검증 완료 후 `ai_trader.py`의 `_CORE_SNIPER_PROMPT`를 전
 
 ---
 
-### 현재 시스템 상태 (2026-03-22 기준)
+### Phase 9 — 메이저 코인 전용 엔진 전략 피벗: Bollinger Ping-Pong → Trend Catcher (2026-03-23)
+
+#### [2026-03-23 업데이트]
+
+**추가/변경 내역**: 메이저 코인 전용 엔진 로직을 '박스권 역추세(Bollinger Ping-Pong)'에서 '정배열 추세 돌파(Trend Catcher)'로 전면 피벗 및 신규 백테스트(`fast_backtest_trend.py`) 진행.
+
+**업데이트 사유 (Reasoning)**:
+
+1차 볼린저 핑퐁 백테스트(`fast_backtest_bollinger_v2.py`) 결과, 메이저 코인(BTC·ETH·SOL·XRP·ADA·DOGE 등)에서 역추세 매매(BB 하단 이탈 반등 포착)의 기대값이 확정적 음수(Negative EV)로 증명됨.
+
+- **Case A** (1h, 2.0σ, TP2/SL1.5): 승률이 존재하나 수수료·슬리피지 반영 시 장기 수익 불가
+- **Case B** (4h+EMA200 필터, 2.0σ, TP3/SL3): EMA200 필터로 신호 급감, 기대값 여전히 음수
+- **Case C** (4h, 2.8σ 극단 과매도, TP3/SL3): 진입 빈도 극소 → 통계적 유의성 미달
+
+**근본 원인**: 메이저 코인은 유동성이 풍부하고 시장 주도 세력이 강해, BB 이탈 후 즉각 반등하는 '핑퐁' 패턴이 아닌 **추세 연장(Trend Continuation)** 성향이 지배적. 역추세 매매는 메이저 코인에서 구조적 음수 EV 전략임이 데이터로 확인됨.
+
+**전략 피벗 결정**: 역추세(Contrarian) 폐기 → **정배열 추세 돌파(Trend Catcher)** 채택
+
+#### 신규 백테스트: fast_backtest_trend.py
+
+**진입 조건** (3중 필터 — 4h 봉 기준):
+
+| 조건 | 설명 |
+|---|---|
+| `Close > EMA200` | 장기 우상향 추세 확인 (상승장 필터) |
+| `EMA20 > EMA50` | 단·중기 정배열 확인 (모멘텀 가속) |
+| `Close > BB Upper(20, 2.0σ)` | 저항 돌파 확인 (추세 돌파 신호) |
+
+**WHITELIST**: BTC, ETH, SOL, XRP, ADA, DOGE, DOT, TRX (KRW 거래쌍, 8종 메이저)
+
+**3가지 TP/SL 케이스 비교**:
+
+| 케이스 | TP | SL | R:R | 손익분기 승률 |
+|---|---|---|---|---|
+| Case A | 4% | 2% | 2.0:1 | 33.3% |
+| Case B | 6% | 3% | 2.0:1 | 33.3% |
+| Case C | 8% | 3% | 2.6:1 | 27.3% |
+
+**`build_entry_signals()` 최적화**: 3개 케이스가 동일한 진입 조건을 공유하므로 심볼당 1회 신호 계산 후 공유 → 연산량 1/3 절감.
+
+| 커밋 | 날짜 | 내용 |
+|---|---|---|
+| `TBD` | 2026-03-23 | feat(backtest): fast_backtest_trend.py — 정배열 추세 돌파 Trend Catcher 백테스터 |
+| `TBD` | 2026-03-23 | docs(state): PROJECT_STATE.md Phase 9 전략 피벗 기록 추가 |
+
+---
+
+### 현재 시스템 상태 (2026-03-23 기준)
 
 ```
 ✅ 완료된 것들
@@ -966,8 +1013,12 @@ v2 백테스트 검증 완료 후 `ai_trader.py`의 `_CORE_SNIPER_PROMPT`를 전
   - 연착륙/즉시 종료 출구 전략
   - DM 리포트 (정기 보고 + AI 매매 리포트)
   - TossPayments 결제 + 구독 만료 알림
+  - Bollinger Ping-Pong Negative EV 확증 → 전략 폐기
+  - Trend Catcher (정배열 추세 돌파) 백테스터 구축 (fast_backtest_trend.py)
 
 🎯 다음 단계 (Forward Testing)
+  - fast_backtest_trend.py 3-Case 결과 분석 → 최적 TP/SL 케이스 선정
+  - Trend Catcher 전략을 ai_trader.py 메이저 코인 전용 엔진에 이식
   - SNIPER/BEAST 모의투자 실시간 가동 → 승률·MDD·ROI 검증
   - 듀얼 엔진 하락장 대응 성능 검증 (전략B 실전 데이터 수집)
   - ANTHROPIC_API_KEY .env 등록 필수 (운영 가동 전제 조건)
