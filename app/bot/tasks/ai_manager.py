@@ -614,6 +614,12 @@ class AIFundManagerTask(commands.Cog):
                     market_summaries.append(
                         f"**🏦 [메이저 트렌드 분석]**\n{major_analysis['market_summary']}"
                     )
+                else:
+                    # AI가 요약 없이 반환한 경우 (관망 판단) — 필터는 통과했으나 진입 근거 없음
+                    market_summaries.append(
+                        "**🏦 [메이저 트렌드 분석]**\n"
+                        f"필터 통과 종목 {len(major_market_data)}개 — AI 진입 근거 미달 → 관망"
+                    )
                 major_picks: list[dict] = major_analysis.get("picks", [])
 
                 # ── 실전 MAJOR 매수 (is_major_on_real만) ──
@@ -667,8 +673,14 @@ class AIFundManagerTask(commands.Cog):
                 paper_slots -= sum(1 for b in paper_bought if (b.get("engine_type") or "").upper() == "MAJOR_TREND")
                 holding_symbols |= {b["symbol"] for b in real_bought + paper_bought}
             else:
+                # 필터 통과 종목 없음 — DM에도 관망 한 줄 표시 (엔진 가동 여부를 사용자가 확인 가능)
                 logger.info(
                     "MAJOR 3중 필터 통과 종목 없음 (관망): user_id=%s", user_id,
+                )
+                market_summaries.append(
+                    "**🏦 [메이저 트렌드 분석]**\n"
+                    "BTC·ETH·XRP·SOL·DOGE·ADA·SUI·PEPE — "
+                    "EMA200·정배열·BB상단 3중 필터 통과 종목 없음 → 전체 관망"
                 )
 
         # ── Step 4: 통합 DM Embed 발송 ───────────────────────────────
