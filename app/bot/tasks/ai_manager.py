@@ -234,11 +234,10 @@ class AIFundManagerTask(commands.Cog):
         """
         user_id = user.user_id
 
-        # ── 엔진 모드 결정 (V2 신규 필드 우선, 구형 ai_trade_style 하위 호환) ──
+        # ── 엔진 모드 결정 ───────────────────────────────────────────────
         engine_mode = (getattr(user, "ai_engine_mode", "SWING") or "SWING").upper()
         if engine_mode not in ("SWING", "SCALPING", "BOTH"):
-            old_style = (getattr(user, "ai_trade_style", "SWING") or "SWING").upper()
-            engine_mode = "SCALPING" if old_style in ("SCALPING", "BEAST") else "SWING"
+            engine_mode = "SWING"
 
         # 현재 사이클에서 가동할 엔진 결정
         run_swing = engine_mode in ("SWING", "BOTH") and is_swing_hour
@@ -1040,6 +1039,8 @@ class AIFundManagerTask(commands.Cog):
                 style_label = "🔥 동시 가동 (스캘핑 가동 중 / 스윙 대기)"
             else:
                 style_label = "🔥 동시 가동 (스윙+스캘핑)"
+        elif engine_mode == "MAJOR":
+            style_label = "🏦 메이저 트렌드 (4h EMA200 필터)"
         else:
             style_label = "📊 듀얼 스윙 (4h 봉)"
 
@@ -1118,10 +1119,26 @@ class AIFundManagerTask(commands.Cog):
                 inline=False,
             )
 
+        # ── 엔진 태그 헬퍼 (trade_style → 섹션 레이블) ──────────────
+        def _engine_tag(item: dict, paper: bool = False) -> str:
+            """trade_style 기준으로 엔진 태그를 반환한다."""
+            style = (item.get("trade_style") or "").upper()
+            prefix = "[🎮모의] " if paper else ""
+            if style == "SCALPING":
+                return f"{prefix}⚡ [스캘핑]"
+            if style == "MAJOR":
+                return f"{prefix}🏦 [MAJOR]"
+            return f"{prefix}📊 [스윙]"
+
         # ════════════════════════════════════════════════════════════
         # 실전 AI 섹션
         # ════════════════════════════════════════════════════════════
         if is_real_active:
+            embed.add_field(
+                name="━━━━━ 👑 실전 AI 거래 내역 ━━━━━",
+                value="\u200b",
+                inline=False,
+            )
             # 긴급 청산 (SELL)
             sold_real = [r for r in real_reviewed if r["action"] == "SELL"]
             if sold_real:
@@ -1133,7 +1150,7 @@ class AIFundManagerTask(commands.Cog):
                 for item in sold_real:
                     icon = "📈" if item["profit_pct"] >= 0 else "📉"
                     embed.add_field(
-                        name=f"🪙 {item['symbol']} [긴급청산]",
+                        name=f"🪙 {item['symbol']} {_engine_tag(item)} [긴급청산]",
                         value=(
                             f"**청산 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
                             f"**AI 판단:** {item['reason']}"
@@ -1150,7 +1167,7 @@ class AIFundManagerTask(commands.Cog):
                 )
                 for item in real_bought:
                     embed.add_field(
-                        name=f"🪙 {item['symbol']} [신규]",
+                        name=f"🪙 {item['symbol']} {_engine_tag(item)} [신규]",
                         value=(
                             f"**매수가:** {format_krw_price(item['buy_price'])} KRW"
                             f"  |  **매수금액:** {item.get('trade_amount', 0):,.0f} KRW\n"
@@ -1175,7 +1192,7 @@ class AIFundManagerTask(commands.Cog):
                 for item in updated_real:
                     icon = "📈" if item["profit_pct"] >= 0 else "📉"
                     embed.add_field(
-                        name=f"🪙 {item['symbol']} [갱신]",
+                        name=f"🪙 {item['symbol']} {_engine_tag(item)} [갱신]",
                         value=(
                             f"**현재 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
                             f"**새 익절:** +{item['new_target']:.1f}%  |  "
@@ -1215,13 +1232,12 @@ class AIFundManagerTask(commands.Cog):
         # 모의투자 섹션 — 모든 항목에 [🎮모의] 태그
         # ════════════════════════════════════════════════════════════
         if is_paper_active:
-            # 실전 섹션이 있으면 구분선 추가
-            if is_real_active:
-                embed.add_field(
-                    name="━━━━━━━━━━━━━━━━━━━━━━",
-                    value="\u200b",
-                    inline=False,
-                )
+            # 실전 섹션과 구분선 추가
+            embed.add_field(
+                name="━━━━━ 🎮 모의투자 거래 내역 ━━━━━",
+                value="\u200b",
+                inline=False,
+            )
 
             # 모의 긴급 청산 (SELL)
             sold_paper = [r for r in paper_reviewed if r["action"] == "SELL"]
@@ -1234,7 +1250,7 @@ class AIFundManagerTask(commands.Cog):
                 for item in sold_paper:
                     icon = "📈" if item["profit_pct"] >= 0 else "📉"
                     embed.add_field(
-                        name=f"🪙 {item['symbol']} [🎮모의 긴급청산]",
+                        name=f"🪙 {item['symbol']} {_engine_tag(item, paper=True)} [긴급청산]",
                         value=(
                             f"**청산 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
                             f"**AI 판단:** {item['reason']}"
@@ -1251,7 +1267,7 @@ class AIFundManagerTask(commands.Cog):
                 )
                 for item in paper_bought:
                     embed.add_field(
-                        name=f"🪙 {item['symbol']} [🎮모의 신규]",
+                        name=f"🪙 {item['symbol']} {_engine_tag(item, paper=True)} [신규]",
                         value=(
                             f"**매수가:** {format_krw_price(item['buy_price'])} KRW"
                             f" _(슬리피지 0.1% 반영)_"
@@ -1277,7 +1293,7 @@ class AIFundManagerTask(commands.Cog):
                 for item in updated_paper:
                     icon = "📈" if item["profit_pct"] >= 0 else "📉"
                     embed.add_field(
-                        name=f"🪙 {item['symbol']} [🎮모의 갱신]",
+                        name=f"🪙 {item['symbol']} {_engine_tag(item, paper=True)} [갱신]",
                         value=(
                             f"**현재 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
                             f"**새 익절:** +{item['new_target']:.1f}%  |  "

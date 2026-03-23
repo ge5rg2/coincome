@@ -1002,24 +1002,62 @@ v2 백테스트 검증 완료 후 `ai_trader.py`의 `_CORE_SNIPER_PROMPT`를 전
 
 ---
 
+---
+
+## 13. 과거 스키마 변경 히스토리 (삭제된 마이그레이션 스크립트 대체 기록)
+
+> 아래 스크립트들은 DB에 성공적으로 적용 완료 후, V2 대청소(2026-03-23) 시점에 삭제되었습니다.
+> 컬럼 존재 여부는 해당 SQLAlchemy 모델을 참조하세요.
+
+| 삭제된 스크립트 | 적용된 컬럼 | 대상 테이블 |
+|---|---|---|
+| `add_report_columns.py` | `report_enabled`, `report_interval_hours`, `last_report_sent_at` | `users` |
+| `add_ai_columns.py` | `ai_mode_enabled`, `ai_trade_amount`*, `ai_budget_krw`* | `users` |
+| `add_ai_max_coins_column.py` | `ai_max_coins` | `users` |
+| `add_ai_paper_mode_column.py` | `ai_paper_mode_enabled` | `users` |
+| `add_ai_renewal_columns.py` | `is_ai_managed` | `bot_settings` |
+| `add_ai_trade_style_column.py` | `ai_trade_style`* | `users` |
+| `add_ai_budget_shutdown_columns.py` | `ai_is_shutting_down` | `users` |
+| `add_ai_log_columns.py` | `trade_style`, `ai_score`, `ai_reason` | `bot_settings`, `trade_history` |
+| `add_bot_setting_ai_columns.py` | `ai_score`, `ai_reason` (중복분) | `bot_settings` |
+| `add_paper_trading.py` | `is_paper_trading`, `virtual_krw`, `trade_history` 테이블 | `users`, `bot_settings` |
+| `add_ai_v2_engine_columns.py` | `ai_engine_mode`, `ai_swing_budget_krw`, `ai_swing_weight_pct`, `ai_scalp_budget_krw`, `ai_scalp_weight_pct` | `users` |
+| `migrate_keys.py` | 업비트 API 키 Fernet 암호화 1회 전환 (데이터 마이그레이션) | `users` |
+| `migrate_v2_architecture.py` | SNIPER/BEAST → SWING/SCALPING 엔진 명칭 변환 (데이터 마이그레이션) | `users` |
+
+> `*` 표시 컬럼: V1 레거시로 판단, `add_major_engine_columns.py`에서 **`ALTER TABLE DROP COLUMN`** 으로 물리적 삭제됨.
+
+**삭제된 폐기 백테스트 스크립트:**
+
+| 파일 | 폐기 사유 |
+|---|---|
+| `fast_backtest_reversal.py` | Phase 7 역추세 검증 → Negative EV 확증, 전략 폐기 |
+| `fast_backtest_reversal_v2.py` | 동일 사유 |
+| `fast_backtest_bollinger.py` | V2(`fast_backtest_bollinger_v2.py`)로 대체 완료 |
+
+---
+
 ### 현재 시스템 상태 (2026-03-23 기준)
 
 ```
 ✅ 완료된 것들
-  - AI 실전 매매 (VIP): claude-sonnet-4-6 기반 SNIPER/BEAST 듀얼 모드
-  - AI 모의투자 (전 등급): 동일 v7/듀얼엔진 전략, 가상 KRW 잔고 시뮬레이션
+  - AI 실전 매매 (VIP): claude-sonnet-4-6 기반 SWING/SCALPING/MAJOR 3-엔진 모듈형
+  - AI 모의투자 (전 등급): 동일 전략, 가상 KRW 잔고 시뮬레이션
   - 듀얼 엔진 (전략A 추세돌파 + 전략B 낙폭과대 반등) — 전천후 매매 가능
+  - MAJOR 엔진 DB 스키마·UI 추가 (Trend Catcher 전략 전용, 백테스트 결과 이식 예정)
   - 3중 방어 (Python 블랙리스트 + 프롬프트 룰 + 코드 검증)
   - 연착륙/즉시 종료 출구 전략
   - DM 리포트 (정기 보고 + AI 매매 리포트)
   - TossPayments 결제 + 구독 만료 알림
   - Bollinger Ping-Pong Negative EV 확증 → 전략 폐기
   - Trend Catcher (정배열 추세 돌파) 백테스터 구축 (fast_backtest_trend.py)
+  - V2 대청소: 레거시 마이그레이션 스크립트 13개 + 폐기 백테스트 3개 삭제
+  - V1 잔재 컬럼(ai_trade_style, ai_budget_krw, ai_trade_amount) 물리적 DROP
 
 🎯 다음 단계 (Forward Testing)
   - fast_backtest_trend.py 3-Case 결과 분석 → 최적 TP/SL 케이스 선정
-  - Trend Catcher 전략을 ai_trader.py 메이저 코인 전용 엔진에 이식
-  - SNIPER/BEAST 모의투자 실시간 가동 → 승률·MDD·ROI 검증
+  - Trend Catcher 전략을 ai_trader.py MAJOR 엔진에 이식 (ai_trader.py 업데이트)
+  - SWING/SCALPING/MAJOR 모의투자 실시간 가동 → 승률·MDD·ROI 검증
   - 듀얼 엔진 하락장 대응 성능 검증 (전략B 실전 데이터 수집)
   - ANTHROPIC_API_KEY .env 등록 필수 (운영 가동 전제 조건)
 ```

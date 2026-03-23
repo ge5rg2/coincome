@@ -47,8 +47,7 @@ class EncryptedString(TypeDecorator):
             return decrypt(value)
         except (InvalidToken, Exception):
             logger.warning(
-                "API 키 복호화 실패 — 평문으로 저장된 값으로 추정됩니다. "
-                "scripts/migrate_keys.py 실행 여부를 확인하세요."
+                "API 키 복호화 실패 — 평문으로 저장된 값으로 추정됩니다."
             )
             return value
 
@@ -81,40 +80,28 @@ class User(Base):
 
     # ── AI 자동 매매 설정 ─────────────────────────────────────────────
     # ai_mode_enabled      : AI 펀드 매니저 활성화 여부 (VIP 전용, 기본 꺼짐)
-    # ai_trade_amount      : AI 1회 매수 금액 (실거래·모의투자 공용, KRW)
     # ai_max_coins         : 동시 보유 최대 코인 수 (기본 3, 실거래·모의투자 각각 적용)
     # ai_paper_mode_enabled: AI 모의투자 ON/OFF (등급 무관, 기본 꺼짐)
     #                        True → 스케줄러가 virtual_krw 잔고로 가상 매매 수행
     ai_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-    ai_trade_amount: Mapped[int] = mapped_column(Integer, default=10000)
     ai_max_coins: Mapped[int] = mapped_column(Integer, default=3)
     ai_paper_mode_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
-
-    # ── AI 투자 성향 ──────────────────────────────────────────────────
-    # SWING    : 4시간 봉 기반 보수적 스윙 매매 (기본값)
-    #            → 01·05·09·13·17·21시 KST 에만 실행
-    # SCALPING : 1시간 봉 기반 공격적 단타/모멘텀 매매
-    #            → 매시 정각 실행 (더 잦은 진입/청산)
-    ai_trade_style: Mapped[str] = mapped_column(String(20), default="SWING")
 
     # ── 모의투자 가상 잔고 ────────────────────────────────────────────
     # virtual_krw : 모의투자 시 사용하는 가상 원화 잔고 (기본 1,000만 원)
     #               매수 시 차감, 매도 시 체결 대금 합산.
     virtual_krw: Mapped[float] = mapped_column(Float, default=10_000_000.0)
 
-    # ── AI 전용 운용 예산 및 연착륙 플래그 ───────────────────────────
-    # ai_budget_krw      : AI 펀드 매니저가 최대로 투자할 수 있는 예산 (KRW).
-    #                      0이면 예산 제한 없음(업비트 실제 잔고 전액 사용).
+    # ── AI 전용 연착륙 플래그 ─────────────────────────────────────────
     # ai_is_shutting_down: True이면 연착륙 진행 중 — 신규 매수를 중단하고
     #                      기존 포지션이 모두 청산되면 ai_mode_enabled=False 로 자동 전환.
-    ai_budget_krw: Mapped[float] = mapped_column(Float, default=0.0)
     ai_is_shutting_down: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ── AI V2: 모듈형 엔진 선택 + 엔진별 독립 예산·비중 ─────────────────
-    # ai_engine_mode     : 가동 엔진 선택
+    # ai_engine_mode     : 알트코인 엔진 선택
     #   "SWING"   — 📊 4h 듀얼 스윙 전용 (01·05·09·13·17·21시 KST 실행)
     #   "SCALPING"— ⚡ 1h 스캘핑 전용   (매시 정각 실행)
-    #   "BOTH"    — 🔥 동시 가동        (두 엔진 독립 실행, 예산·비중 각각 설정)
+    #   "BOTH"    — 🔥 동시 가동        (스윙+스캘핑 독립 실행, 예산·비중 각각 설정)
     # ai_swing_budget_krw  : 스윙 엔진 운용 예산 한도 (KRW, 1,000,000 ~ 100,000,000)
     # ai_swing_weight_pct  : 스윙 1회 진입 비중 (10 ~ 100%)
     # ai_scalp_budget_krw  : 스캘핑 엔진 운용 예산 한도 (KRW, 1,000,000 ~ 100,000,000)
@@ -124,6 +111,16 @@ class User(Base):
     ai_swing_weight_pct: Mapped[int] = mapped_column(Integer, default=20)
     ai_scalp_budget_krw: Mapped[int] = mapped_column(Integer, default=1_000_000)
     ai_scalp_weight_pct: Mapped[int] = mapped_column(Integer, default=20)
+
+    # ── AI V2: MAJOR 메이저 코인 전용 Trend Catcher 엔진 ─────────────
+    # is_major_enabled  : MAJOR 엔진 활성화 여부 (기본 꺼짐)
+    #                     스윙/스캘핑과 독립적으로 ON/OFF 가능
+    # major_budget      : MAJOR 엔진 운용 예산 한도 (KRW, 1,000,000 ~ 100,000,000)
+    # major_trade_ratio : MAJOR 1회 진입 비중 (10 ~ 100%, 기본 10%)
+    #                     전략: EMA200·EMA20>EMA50·BB상단 돌파 3중 필터 (4h 봉)
+    is_major_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    major_budget: Mapped[int] = mapped_column(Integer, default=0)
+    major_trade_ratio: Mapped[int] = mapped_column(Integer, default=10)
 
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")

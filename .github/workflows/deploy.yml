@@ -30,30 +30,12 @@ jobs:
 
             # ---------------------------------------------------
             # 🌟 [핵심] 봇을 켜기 전, DB 구조를 최신화하는 작업 🌟
-            # (만약 이미 추가된 컬럼이라면 스크립트가 알아서 스킵합니다)
+            # V2 대청소 이후: 단일 마이그레이션 스크립트만 실행
+            #   - MAJOR 엔진 컬럼 3개 추가 (is_major_enabled, major_budget, major_trade_ratio)
+            #   - V1 레거시 컬럼 3개 DROP (ai_trade_style, ai_budget_krw, ai_trade_amount)
+            # 이미 적용된 환경에서는 자동으로 스킵됩니다 (idempotent).
             # ---------------------------------------------------
-
-            # 1) 정기 보고 관련 컬럼 마이그레이션
-            docker-compose run --rm app python -m scripts.add_report_columns.py
-
-            # 2) AI 자동매매 관련 컬럼 마이그레이션
-            docker-compose run --rm app python -m scripts.add_ai_columns
-            docker-compose run --rm app python -m scripts.add_ai_max_coins_column
-            docker-compose run --rm app python -m scripts.add_paper_trading
-            docker-compose run --rm app python -m scripts.add_ai_paper_mode_column
-            docker-compose run --rm app python -m scripts.add_ai_renewal_columns
-            docker-compose run --rm app python -m scripts.add_ai_trade_style_column
-            docker-compose run --rm app python -m scripts.add_ai_budget_shutdown_columns
-
-            # 3) AI 메타데이터 컬럼 마이그레이션 (trade_style / ai_score / ai_reason)
-            docker-compose run --rm app python -m scripts.add_ai_log_columns
-            docker-compose run --rm app python -m scripts.add_bot_setting_ai_columns
-
-            # 4) AI 트레이딩 V2 엔진 컬럼 마이그레이션 (SWING/SCALPING/BOTH 모듈형 엔진)
-            docker-compose run --rm app python -m scripts.add_ai_v2_engine_columns
-
-            # 5) V2 아키텍처 데이터 마이그레이션 (기존 ai_trade_style → ai_engine_mode 변환)
-            docker-compose run --rm app python scripts/migrate_v2_architecture.py --apply
+            docker-compose run --rm app python -m scripts.add_major_engine_columns
 
             # ---------------------------------------------------
 

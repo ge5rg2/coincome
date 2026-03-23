@@ -139,10 +139,8 @@ class PaperSettingView(discord.ui.View):
         super().__init__(timeout=180)
         self._user = user
         current_engine = (getattr(user, "ai_engine_mode", None) or "SWING").upper()
-        # 하위 호환: SNIPER/BEAST → SWING/SCALPING
         if current_engine not in ("SWING", "SCALPING", "BOTH"):
-            old_style = (getattr(user, "ai_trade_style", "SWING") or "SWING").upper()
-            current_engine = "SCALPING" if old_style in ("BEAST", "SCALPING") else "SWING"
+            current_engine = "SWING"
 
         self.mode_value: str = "ON" if user.ai_paper_mode_enabled else "OFF"
         self.engine_value: str = current_engine
@@ -351,8 +349,6 @@ class PaperSwingSettingsModal(discord.ui.Modal, title="🎮 [모의투자] 4h �
             user.ai_swing_budget_krw = budget
             user.ai_swing_weight_pct = weight
             user.ai_max_coins = max_coins
-            user.ai_trade_style = "SWING"         # 하위 호환
-            user.ai_trade_amount = trade_amount   # 하위 호환
             await db.commit()
             final_virtual_krw = float(user.virtual_krw)
 
@@ -503,8 +499,6 @@ class PaperScalpSettingsModal(discord.ui.Modal, title="🎮 [모의투자] 1h �
             user.ai_scalp_budget_krw = budget
             user.ai_scalp_weight_pct = weight
             user.ai_max_coins = max_coins
-            user.ai_trade_style = "SCALPING"      # 하위 호환
-            user.ai_trade_amount = trade_amount   # 하위 호환
             await db.commit()
             final_virtual_krw = float(user.virtual_krw)
 
@@ -691,8 +685,6 @@ class PaperBothSettingsModal(discord.ui.Modal, title="🎮 [모의투자] 동시
             user.ai_scalp_budget_krw = scalp_budget
             user.ai_scalp_weight_pct = scalp_weight
             user.ai_max_coins = max_coins
-            user.ai_trade_style = "SWING"                            # 하위 호환 (스윙 기준)
-            user.ai_trade_amount = swing_trade_amount                 # 하위 호환
             await db.commit()
             final_virtual_krw = float(user.virtual_krw)
 
@@ -800,11 +792,10 @@ class PaperTradingCog(commands.Cog):
                 await db.commit()
                 await db.refresh(user)
 
-        # 현재 엔진 모드 파악 (하위 호환 포함)
-        engine_mode = (getattr(user, "ai_engine_mode", None) or "").upper()
+        # 현재 엔진 모드 파악
+        engine_mode = (getattr(user, "ai_engine_mode", None) or "SWING").upper()
         if engine_mode not in ("SWING", "SCALPING", "BOTH"):
-            old_style = (getattr(user, "ai_trade_style", "SWING") or "SWING").upper()
-            engine_mode = "SCALPING" if old_style in ("BEAST", "SCALPING") else "SWING"
+            engine_mode = "SWING"
 
         _ENGINE_LABELS = {
             "SWING": "📊 4h 듀얼 스윙",
@@ -1119,7 +1110,23 @@ class PaperTradingCog(commands.Cog):
 
         # 모의 총자산 = 현금 잔고 + 코인 매수 원금 + 미실현 손익
         paper_total_asset = virtual_krw + paper_coin_invested + paper_unrealized_pnl
-        paper_balance_change = paper_total_asset - _INITIAL_VIRTUAL_KRW
+
+        # 동적 초기 시드: 현재 활성화된 엔진 예산 합산 (V2 다중 엔진 지원)
+        # SWING 또는 BOTH → ai_swing_budget_krw 포함
+        # SCALPING 또는 BOTH → ai_scalp_budget_krw 포함
+        # is_major_enabled → major_budget 포함
+        _active_engine = (getattr(user, "ai_engine_mode", "SWING") or "SWING").upper()
+        _paper_initial_seed: int = 0
+        if _active_engine in ("SWING", "BOTH"):
+            _paper_initial_seed += int(getattr(user, "ai_swing_budget_krw", 0) or 0)
+        if _active_engine in ("SCALPING", "BOTH"):
+            _paper_initial_seed += int(getattr(user, "ai_scalp_budget_krw", 0) or 0)
+        if getattr(user, "is_major_enabled", False):
+            _paper_initial_seed += int(getattr(user, "major_budget", 0) or 0)
+        # 설정된 예산이 없으면 _INITIAL_VIRTUAL_KRW(1,000만) 폴백
+        paper_initial_seed = float(_paper_initial_seed) if _paper_initial_seed > 0 else _INITIAL_VIRTUAL_KRW
+
+        paper_balance_change = paper_total_asset - paper_initial_seed
         paper_coin_pct = (
             paper_coin_invested / paper_total_asset * 100
         ) if paper_total_asset > 0 else 0.0
@@ -1215,7 +1222,8 @@ class PaperTradingCog(commands.Cog):
                     f"📊 포트폴리오 비중\n"
                     f"[{bar}] 코인 {paper_coin_pct:.0f}% | 현금 {100 - paper_coin_pct:.0f}%\n"
                     f"💰 총 보유 자산: **{paper_total_asset:,.0f} KRW**"
-                    f"  {balance_icon} 초기 대비: **{paper_balance_change:+,.0f} KRW**\n"
+                    f"  {balance_icon} 초기 시드 대비: **{paper_balance_change:+,.0f} KRW**\n"
+                    f"  (기준 시드: {paper_initial_seed:,.0f} KRW — 현재 활성 엔진 예산 합산)\n"
                     f"  현금: {virtual_krw:,.0f} | 코인 원금: {paper_coin_invested:,.0f}"
                     f" | 미실현: {paper_unrealized_pnl:+,.0f} KRW"
                 ),
