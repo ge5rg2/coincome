@@ -854,7 +854,26 @@ class AITraderService:
             return []
 
         # ── 유저 프롬프트 구성 ────────────────────────────────────────
-        lines: list[str] = ["# 현재 보유 포지션 (멀티 타임프레임 + ATR 변동성)\n"]
+        _etype = engine_type.upper()
+        if _etype in ("SCALPING", "BEAST"):
+            _engine_hint = (
+                "## 엔진 컨텍스트: 알트 스캘핑 (1h 봉 단타)\n"
+                "진입 기준: 1h Close>MA20, RSI 60~75 / TP 2.0% / SL 1.5%\n"
+                "SELL 판단 시 1h 지표를 최우선으로 참고할 것.\n"
+            )
+        elif _etype in ("MAJOR_TREND", "MAJOR"):
+            _engine_hint = (
+                "## 엔진 컨텍스트: 메이저 트렌드 캐처 (4h 봉)\n"
+                "진입 기준: EMA200 상방+정배열+BB상단 돌파 / TP 4.0% / SL 2.0%\n"
+                "SELL 판단 시 4h 지표를 최우선으로 참고할 것 (1h 노이즈에 과반응 금지).\n"
+            )
+        else:  # SWING
+            _engine_hint = (
+                "## 엔진 컨텍스트: 알트 스윙 (4h 봉 듀얼 전략)\n"
+                "전략A 익절 6%/손절 4% | 전략B 익절 3%/손절 2.5%\n"
+                "SELL 판단 시 4h 지표를 중심으로, 1h·15m 지표로 타이밍 보조 참고.\n"
+            )
+        lines: list[str] = [f"{_engine_hint}\n# 현재 보유 포지션 (멀티 타임프레임 + ATR 변동성)\n"]
         for pos in positions_data:
             symbol     = pos["symbol"]
             buy_price  = pos["buy_price"]
