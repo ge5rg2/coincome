@@ -1322,14 +1322,17 @@ class AIFundManagerTask(commands.Cog):
         # 유저가 "스윙 고장?" 오해하지 않도록 명시적 안내 문구를 붙인다.
         _summary_display = market_summary or "분석 결과를 가져오지 못했습니다."
         if swing_is_idle:
-            _swing_idle_notice = (
+            # ALL 모드: 스윙·메이저 모두 4h 주기 → 비스윙 시각에는 둘 다 대기 안내
+            _idle_notices = (
                 "💤 **알트 스윙 엔진**: 현재 캔들 형성 대기 중 "
-                "(다음 4h 분석 시각에 가동)"
+                "(다음 4h 분석 시각에 가동)\n"
+                "💤 **메이저 트렌드 엔진**: 스윙과 동일한 4h 주기 — "
+                "대기 중 (다음 4h 분석 시각에 가동)"
             )
             _summary_display = (
-                _summary_display + "\n\n" + _swing_idle_notice
+                _summary_display + "\n\n" + _idle_notices
                 if market_summary
-                else _swing_idle_notice
+                else _idle_notices
             )
 
         embed.add_field(
