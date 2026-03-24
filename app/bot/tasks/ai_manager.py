@@ -177,7 +177,7 @@ class AIFundManagerTask(commands.Cog):
         else:
             target_users = [
                 u for u in all_users
-                if (getattr(u, "ai_engine_mode", "SWING") or "SWING").upper() in ("SCALPING", "ALL", "BOTH")
+                if (getattr(u, "ai_engine_mode", "SWING") or "SWING").upper() in ("SCALPING", "ALL", "BOTH", "MAJOR")
             ]
 
         if not target_users:
@@ -319,31 +319,45 @@ class AIFundManagerTask(commands.Cog):
         paper_bought:     list[dict] = []
         market_summaries: list[str]  = []
 
-        # 리뷰용 엔진 타입 결정 (포지션의 trade_style과 무관하게 주 엔진 사용)
-        _review_engine = "SCALPING" if engine_mode == "SCALPING" else "SWING"
+        def _group_by_engine(settings: list) -> dict[str, list]:
+            """포지션의 trade_style에 따라 엔진별로 그룹화한다.
+            ALL 모드에서 SWING/SCALPING/MAJOR 포지션이 혼재할 때 각 포지션을
+            올바른 타임프레임(4h/1h)으로 리뷰하기 위해 사용한다.
+            """
+            groups: dict[str, list] = {}
+            for s in settings:
+                style = (s.trade_style or "SWING").upper()
+                if style in ("SCALPING", "BEAST"):
+                    key = "SCALPING"
+                elif style in ("MAJOR", "MAJOR_TREND"):
+                    key = "MAJOR_TREND"
+                else:
+                    key = "SWING"
+                groups.setdefault(key, []).append(s)
+            return groups
 
-        # ── Step 1: 실전 포지션 리뷰 ─────────────────────────────────
-        if real_running:
+        # ── Step 1: 실전 포지션 리뷰 (엔진별 분리) ───────────────────
+        for _eng, _group in _group_by_engine(real_running).items():
             await self._review_existing_positions(
                 user_id=user_id,
-                running_settings=real_running,
+                running_settings=_group,
                 market_data=market_data,
                 ws_manager=ws_manager,
                 registry=registry,
                 reviewed_positions=real_reviewed,
-                engine_type=_review_engine,
+                engine_type=_eng,
             )
 
-        # ── Step 2: 모의 포지션 리뷰 ─────────────────────────────────
-        if paper_running:
+        # ── Step 2: 모의 포지션 리뷰 (엔진별 분리) ───────────────────
+        for _eng, _group in _group_by_engine(paper_running).items():
             await self._review_existing_positions(
                 user_id=user_id,
-                running_settings=paper_running,
+                running_settings=_group,
                 market_data=market_data,
                 ws_manager=ws_manager,
                 registry=registry,
                 reviewed_positions=paper_reviewed,
-                engine_type=_review_engine,
+                engine_type=_eng,
             )
 
         # ── 연착륙 분기: 종료 모드 시 신규 매수 없이 리뷰만 완료 ──────
@@ -389,6 +403,9 @@ class AIFundManagerTask(commands.Cog):
                         if db_user:
                             db_user.ai_mode_enabled = False
                             db_user.ai_is_shutting_down = False
+                            # MAJOR 엔진도 함께 종료 (연착륙은 모든 실전 엔진 종료를 의미)
+                            if hasattr(db_user, "is_major_enabled"):
+                                db_user.is_major_enabled = False
                             await db.commit()
 
                     logger.info("AI 연착륙 종료 완료 (포지션 전부 청산): user_id=%s", user_id)
@@ -410,6 +427,7 @@ class AIFundManagerTask(commands.Cog):
 
         # ── 실전 KRW 잔고 조회 (엔진별 예산 계산에 1회만 사용) ──────
         actual_krw = 0.0
+        _krw_fetch_failed = False
         if is_real_active and exchange is not None:
             try:
                 actual_krw = await exchange.fetch_krw_balance()
@@ -417,6 +435,22 @@ class AIFundManagerTask(commands.Cog):
                 logger.warning(
                     "KRW 잔고 조회 실패: user_id=%s err=%s", user_id, exc
                 )
+                _krw_fetch_failed = True
+                # 잔고 조회 실패 시 신규 매수 불가 → 유저에게 안내
+                _krw_err_embed = discord.Embed(
+                    title="⚠️ AI 매수 일시 중단 — 잔고 조회 실패",
+                    description=(
+                        "업비트 KRW 잔고 조회에 실패하여 이번 사이클의 **신규 매수를 건너뜁니다**.\n\n"
+                        "포지션 리뷰(HOLD/UPDATE/SELL)는 정상 진행됩니다.\n\n"
+                        "**가능한 원인:**\n"
+                        "- 업비트 API 키 만료 또는 IP 화이트리스트 오류\n"
+                        "- 업비트 서버 일시 장애\n\n"
+                        f"_(오류: `{exc}`)_\n"
+                        "API 키 상태를 `/키등록` 명령어로 재확인해 주세요."
+                    ),
+                    color=discord.Color.orange(),
+                )
+                await self._send_dm_embed(user_id, _krw_err_embed)
 
         # ── Step 3-a: SWING 엔진 분석·매수 ───────────────────────────
         if run_swing:
@@ -448,7 +482,7 @@ class AIFundManagerTask(commands.Cog):
                 )
             swing_picks: list[dict] = swing_analysis.get("picks", [])
 
-            if is_real_active and real_slots > 0 and swing_picks:
+            if is_real_active and not _krw_fetch_failed and real_slots > 0 and swing_picks:
                 await self._buy_new_coins(
                     user=user,
                     picks=swing_picks,
@@ -462,6 +496,8 @@ class AIFundManagerTask(commands.Cog):
                     max_slots=real_slots,
                     engine_type="SWING",
                 )
+            elif is_real_active and _krw_fetch_failed:
+                logger.info("잔고 조회 실패로 실전 SWING 매수 스킵: user_id=%s", user_id)
             elif is_real_active and real_slots <= 0:
                 logger.info(
                     "최대 보유 종목 도달로 실전 SWING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
@@ -528,7 +564,7 @@ class AIFundManagerTask(commands.Cog):
                 )
             scalp_picks: list[dict] = scalp_analysis.get("picks", [])
 
-            if is_real_active and real_slots > 0 and scalp_picks:
+            if is_real_active and not _krw_fetch_failed and real_slots > 0 and scalp_picks:
                 await self._buy_new_coins(
                     user=user,
                     picks=scalp_picks,
@@ -542,6 +578,8 @@ class AIFundManagerTask(commands.Cog):
                     max_slots=real_slots,
                     engine_type="SCALPING",
                 )
+            elif is_real_active and _krw_fetch_failed:
+                logger.info("잔고 조회 실패로 실전 SCALPING 매수 스킵: user_id=%s", user_id)
             elif is_real_active and real_slots <= 0:
                 logger.info(
                     "최대 보유 종목 도달로 실전 SCALPING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
@@ -623,7 +661,7 @@ class AIFundManagerTask(commands.Cog):
                 major_picks: list[dict] = major_analysis.get("picks", [])
 
                 # ── 실전 MAJOR 매수 (is_major_on_real만) ──
-                if is_real_active and is_major_on_real and real_slots > 0 and major_picks:
+                if is_real_active and is_major_on_real and not _krw_fetch_failed and real_slots > 0 and major_picks:
                     await self._buy_new_coins(
                         user=user,
                         picks=major_picks,
@@ -637,6 +675,8 @@ class AIFundManagerTask(commands.Cog):
                         max_slots=real_slots,
                         engine_type="MAJOR_TREND",
                     )
+                elif is_real_active and is_major_on_real and _krw_fetch_failed:
+                    logger.info("잔고 조회 실패로 실전 MAJOR 매수 스킵: user_id=%s", user_id)
                 elif is_real_active and is_major_on_real and real_slots <= 0:
                     logger.info(
                         "최대 보유 종목 도달로 실전 MAJOR 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
@@ -733,6 +773,29 @@ class AIFundManagerTask(commands.Cog):
             reviewed_positions: 결과를 축적할 리스트 (DM 리포트용).
             engine_type:        "SWING" 또는 "SCALPING" — 사용할 지표 타임프레임 결정.
         """
+        # ── 캐시 미스 심볼 on-demand fetch (MAJOR 코인 등 Top N 외 종목 보장) ──
+        # running_settings 중 market_data에 없는 심볼을 실시간 fetch해서 채운다.
+        # 이미 캐시된 심볼은 재fetch하지 않는다.
+        _mdm = MarketDataManager.get()
+        _missing = [
+            s.symbol for s in running_settings
+            if s.buy_price is not None and market_data.get(s.symbol) is None
+        ]
+        if _missing:
+            logger.info(
+                "포지션 리뷰 캐시 미스 → on-demand fetch: user_id=%s symbols=%s",
+                user_id, _missing,
+            )
+            _fetched_extra: dict[str, dict] = {}
+            for _sym in _missing:
+                _data = await _mdm.fetch_and_cache_symbol(_sym)
+                if _data is not None:
+                    _fetched_extra[_sym] = _data
+                await asyncio.sleep(0.5)
+            if _fetched_extra:
+                # 원본 market_data는 caller가 공유하므로 shallow copy 후 병합
+                market_data = {**market_data, **_fetched_extra}
+
         positions_data: list[dict] = []
         for s in running_settings:
             if s.buy_price is None:
@@ -755,6 +818,7 @@ class AIFundManagerTask(commands.Cog):
                     "profit_pct":        profit_pct,
                     "target_profit_pct": float(s.target_profit_pct or 3.0),
                     "stop_loss_pct":     float(s.stop_loss_pct or 2.0),
+                    "trade_style":       (s.trade_style or "SWING").upper(),  # DM 엔진 태그용
                 }
             )
 
@@ -797,6 +861,17 @@ class AIFundManagerTask(commands.Cog):
                             "AI 긴급 청산 실패 (force_sell 반환 False): user_id=%s symbol=%s",
                             user_id, symbol,
                         )
+                        # 사용자에게 수동 확인 요청 DM 발송
+                        _err_embed = discord.Embed(
+                            title="⚠️ AI 긴급 청산 실패 — 수동 확인 필요",
+                            description=(
+                                f"`{symbol}` 포지션을 AI가 청산하려 했으나 **업비트 API 오류**로 실패했습니다.\n\n"
+                                f"**AI 판단:** {reason}\n\n"
+                                "업비트 앱에서 직접 포지션 상태를 확인하고 필요 시 수동 매도해 주세요."
+                            ),
+                            color=discord.Color.red(),
+                        )
+                        await self._send_dm_embed(user_id, _err_embed)
                 else:
                     logger.warning(
                         "AI 긴급 청산: 워커 없음 (이미 종료됐을 수 있음): "
@@ -830,12 +905,13 @@ class AIFundManagerTask(commands.Cog):
 
             reviewed_positions.append(
                 {
-                    "symbol":     symbol,
-                    "action":     action,
-                    "profit_pct": pos["profit_pct"],
-                    "new_target": new_tgt,
-                    "new_sl":     new_sl,
-                    "reason":     reason,
+                    "symbol":      symbol,
+                    "action":      action,
+                    "profit_pct":  pos["profit_pct"],
+                    "new_target":  new_tgt,
+                    "new_sl":      new_sl,
+                    "reason":      reason,
+                    "trade_style": pos.get("trade_style", "SWING"),  # _engine_tag 표시용
                 }
             )
 
@@ -1050,25 +1126,52 @@ class AIFundManagerTask(commands.Cog):
                 # is_ai_managed=True 로 수동 봇 포지션과 격리.
                 # buy_price·amount_coin 을 함께 저장해 TradingWorker 가
                 # _decide_entry() 에서 '포지션 복구' 경로를 타도록 유도.
-                async with AsyncSessionLocal() as db:
-                    setting = BotSetting(
-                        user_id=user_id,
-                        symbol=symbol,
-                        buy_amount_krw=safe_trade_amount,
-                        target_profit_pct=target_profit,
-                        stop_loss_pct=stop_loss,
-                        is_running=True,
-                        buy_price=buy_price,
-                        amount_coin=amount_coin,
-                        is_paper_trading=is_paper_mode,   # ← 모의/실전 격리 플래그
-                        is_ai_managed=True,                # ← 수동 봇과의 격리 플래그
-                        trade_style=engine_type,           # ← AI 메타데이터 (SWING/SCALPING)
-                        ai_score=score,
-                        ai_reason=pick.get("reason"),
+                #
+                # ⚠️ 실거래에서 이 블록이 실패하면 업비트에는 체결됐으나 DB·워커가 없는
+                # '고아 포지션'이 발생한다. 별도 try/except로 사용자에게 즉시 DM 알림.
+                try:
+                    async with AsyncSessionLocal() as db:
+                        setting = BotSetting(
+                            user_id=user_id,
+                            symbol=symbol,
+                            buy_amount_krw=safe_trade_amount,
+                            target_profit_pct=target_profit,
+                            stop_loss_pct=stop_loss,
+                            is_running=True,
+                            buy_price=buy_price,
+                            amount_coin=amount_coin,
+                            is_paper_trading=is_paper_mode,   # ← 모의/실전 격리 플래그
+                            is_ai_managed=True,                # ← 수동 봇과의 격리 플래그
+                            trade_style=engine_type,           # ← AI 메타데이터 (SWING/SCALPING)
+                            ai_score=score,
+                            ai_reason=pick.get("reason"),
+                        )
+                        db.add(setting)
+                        await db.commit()
+                        await db.refresh(setting)
+                except Exception as db_exc:
+                    logger.error(
+                        "AI 매수 DB 삽입 실패: user_id=%s symbol=%s "
+                        "buy_price=%.0f amount=%.6f err=%s",
+                        user_id, symbol, buy_price, amount_coin, db_exc,
                     )
-                    db.add(setting)
-                    await db.commit()
-                    await db.refresh(setting)
+                    if not is_paper_mode:
+                        # 실거래: 업비트에는 체결됐으나 워커 없음 → 즉시 수동 확인 요청
+                        _db_err_embed = discord.Embed(
+                            title="🚨 AI 매수 완료 — DB 저장 실패 (수동 확인 필요)",
+                            description=(
+                                f"`{symbol}` 매수는 **업비트에서 체결**됐으나 "
+                                f"DB 저장에 실패해 **자동 익절·손절 워커가 등록되지 않았습니다**.\n\n"
+                                f"**체결가:** {format_krw_price(buy_price)} KRW  |  "
+                                f"**수량:** {amount_coin:.6f}\n"
+                                f"**익절 목표:** +{target_profit:.1f}%  |  **손절 기준:** -{stop_loss:.1f}%\n\n"
+                                "업비트 앱에서 직접 포지션을 확인하고 수동으로 매도 기준을 관리해 주세요.\n"
+                                f"_(오류: `{db_exc}`)_"
+                            ),
+                            color=discord.Color.dark_red(),
+                        )
+                        await self._send_dm_embed(user_id, _db_err_embed)
+                    raise  # 이미 체결된 경우를 bought_positions에 추가 안 하도록 상위 except로 전파
 
                 # ── TradingWorker 등록·시작 ───────────────────────────
                 worker = TradingWorker(

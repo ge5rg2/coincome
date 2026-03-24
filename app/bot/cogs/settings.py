@@ -674,6 +674,24 @@ class SettingsCog(commands.Cog):
         )
 
         embed.add_field(
+            name="🔄 매시간 AI 포지션 리뷰 기준",
+            value=(
+                "보유 중인 포지션은 **매시 정각**마다 AI가 자동으로 재평가합니다.\n"
+                "아래 3가지 기준을 종합해 **HOLD / UPDATE(목표 조정) / SELL(즉시 청산)** 을 결정합니다.\n\n"
+                "**① 진행률(Progress) 기반 본절 이동**\n"
+                "목표 수익의 **50% 이상 달성** 시 손절선을 매수가(±0%)로 끌어올립니다.\n"
+                "이후 추가 하락해도 원금 손실이 없는 **리스크 프리(Risk-Free) 상태**로 전환됩니다.\n\n"
+                "**② 모멘텀 관성(Momentum Inertia) 평가**\n"
+                "RSI·이동평균(MA)이 진입 시점 대비 **유지 또는 강화**되고 있으면 목표가를 상향합니다.\n"
+                "반대로 추세가 꺾이는 신호(RSI 급락·MA 데드크로스)가 감지되면 조기 청산을 검토합니다.\n\n"
+                "**③ 변동성(ATR) 대비 손절폭 검증**\n"
+                "현재 ATR(Average True Range)이 진입 당시보다 **급증**했다면\n"
+                "손절폭을 ATR 배수만큼 넓히거나(UPDATE), 변동성이 감당 불가 수준이면 즉시 청산(SELL)합니다."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
             name="🔧 주요 명령어",
             value=(
                 "`/ai실전` — VIP 전용 실전 AI 설정\n"

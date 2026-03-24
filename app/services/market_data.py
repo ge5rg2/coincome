@@ -224,6 +224,102 @@ class MarketDataManager:
         """전체 캐시 스냅샷을 반환한다."""
         return dict(self._cache)
 
+    async def fetch_and_cache_symbol(self, symbol: str) -> dict | None:
+        """단일 심볼의 4h+1h+15m 지표를 즉시 fetch하여 캐시에 추가·갱신한다.
+
+        보유 포지션의 심볼이 정기 캐시(Top N)에 없을 때 on-demand로 호출한다.
+        MAJOR 코인(BTC, ETH 등)이 Top N 외에 있을 때도 리뷰 지표를 보장한다.
+
+        Args:
+            symbol: CCXT 표준 심볼 (예: "BTC/KRW").
+
+        Returns:
+            캐싱된 지표 딕셔너리, 또는 fetch 실패 시 None.
+        """
+        loop = asyncio.get_event_loop()
+        entry: dict = {}
+        try:
+            # ── (A) 4h 봉 OHLCV ──────────────────────────────────────
+            from functools import partial as _partial
+            fetch_4h = _partial(self._exchange.fetch_ohlcv, symbol, "4h", None, OHLCV_LIMIT)
+            ohlcv_4h: list[list] = await loop.run_in_executor(None, fetch_4h)
+
+            if ohlcv_4h:
+                df4     = pd.DataFrame(ohlcv_4h, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                close4  = df4["close"]
+                rsi14   = _calc_rsi(close4, 14)
+                ma20    = _calc_ma(close4, 20)
+                ma50    = _calc_ma(close4, 50)
+                candles = _ohlcv_to_candles(ohlcv_4h)
+                price   = float(ohlcv_4h[-1][4])
+                del df4
+            else:
+                rsi14 = ma20 = ma50 = None
+                candles = []
+                price   = 0.0
+
+            entry.update({"price": price, "rsi14": rsi14, "ma20": ma20,
+                          "ma50": ma50, "candles": candles,
+                          "change_pct": None, "volume_krw": None})
+
+            await asyncio.sleep(TF_SLEEP)
+
+            # ── (B) 1h 봉 OHLCV ──────────────────────────────────────
+            fetch_1h = _partial(self._exchange.fetch_ohlcv, symbol, "1h", None, OHLCV_LIMIT_1H)
+            ohlcv_1h: list[list] = await loop.run_in_executor(None, fetch_1h)
+
+            if ohlcv_1h:
+                df1        = pd.DataFrame(ohlcv_1h, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                close1     = df1["close"]
+                rsi14_1h   = _calc_rsi(close1, 14)
+                ma20_1h    = _calc_ma(close1, 20)
+                candles_1h = _ohlcv_to_candles(ohlcv_1h)
+                atr_val    = _calc_atr(df1, 14)
+                atr_pct    = (atr_val / price * 100) if (atr_val and price > 0) else None
+                del df1
+            else:
+                rsi14_1h = ma20_1h = atr_pct = None
+                candles_1h = []
+
+            entry.update({"atr_pct": atr_pct, "rsi14_1h": rsi14_1h,
+                          "ma20_1h": ma20_1h, "candles_1h": candles_1h})
+
+            await asyncio.sleep(TF_SLEEP)
+
+            # ── (C) 15m 봉 OHLCV ─────────────────────────────────────
+            fetch_15m = _partial(self._exchange.fetch_ohlcv, symbol, "15m", None, OHLCV_LIMIT_15M)
+            ohlcv_15m: list[list] = await loop.run_in_executor(None, fetch_15m)
+
+            if ohlcv_15m:
+                df15         = pd.DataFrame(ohlcv_15m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                close15      = df15["close"]
+                rsi14_15m    = _calc_rsi(close15, 14)
+                ma20_15m     = _calc_ma(close15, 20)
+                candles_15m  = _ohlcv_to_candles(ohlcv_15m)
+                del df15
+            else:
+                rsi14_15m = ma20_15m = None
+                candles_15m = []
+
+            entry.update({"rsi14_15m": rsi14_15m, "ma20_15m": ma20_15m,
+                          "candles_15m": candles_15m,
+                          "updated_at": datetime.now(timezone.utc)})
+
+            # 기존 캐시에 merge (Top N 캐시를 덮어쓰지 않도록 update 방식 사용)
+            self._cache[symbol] = entry
+            logger.info(
+                "on-demand 캐싱 완료: %s  RSI4h=%s  RSI1h=%s  ATR%%=%s",
+                symbol,
+                f"{rsi14:.1f}"   if rsi14    is not None else "N/A",
+                f"{rsi14_1h:.1f}" if rsi14_1h is not None else "N/A",
+                f"{atr_pct:.2f}%" if atr_pct  is not None else "N/A",
+            )
+            return entry
+
+        except Exception as exc:
+            logger.error("on-demand 캐싱 실패: symbol=%s err=%s", symbol, exc)
+            return None
+
     # ------------------------------------------------------------------
     # 백그라운드 루프
     # ------------------------------------------------------------------
