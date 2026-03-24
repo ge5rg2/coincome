@@ -12,9 +12,9 @@
 | **자금** | 사용자 실제 KRW 잔고 | 가상 잔고 (설정 금액) | 가상 시드 (기본 1,000,000 KRW) |
 | **주문 실행** | Upbit API 실제 주문 | 없음 (시세 기록만) | 없음 (OHLCV 시뮬레이션) |
 | **AI 호출** | 매 폴링 사이클 (0.5초) | 매 폴링 사이클 (0.5초) | 사용자 정의 Step 간격 (기본 24h) |
-| **지표 수집** | 실시간 API (`fetch_ticker`) | 실시간 API (`fetch_ticker`) | 사전 수집 OHLCV 슬라이싱 |
+| **지표 수집** | 실시간 API (`fetch_ticker`) + MarketDataManager 1h 주기 캐시 | 동일 | 사전 수집 OHLCV 슬라이싱 |
 | **결과 저장** | DB (`trades`, `bot_settings`) | DB (`paper_trades`) | CSV (`.result/backtest_results_*.csv`) |
-| **구독 필요** | PRO 이상 | FREE 이상 | 불필요 (스크립트 직접 실행) |
+| **구독 필요** | VIP | FREE 이상 | 불필요 (스크립트 직접 실행) |
 | **지원 AI 모델** | Claude (Anthropic) | Claude (Anthropic) | OpenAI / Anthropic / Gemini |
 | **진입 파일** | `app/services/trading_worker.py` | `app/services/trading_worker.py` | `scripts/backtester.py` |
 
@@ -26,35 +26,67 @@
 
 ```
 Discord Bot (discord.py)
-  └─ /ai실전 · /ai모의 커맨드 (bot/cogs/settings.py)
-       └─ WorkerRegistry.start_worker(user_id)
-            └─ TradingWorker (asyncio 루프)
-                 ├─ MarketDataService.get_top_coins()     ← Upbit ccxt
-                 ├─ AITraderService.pick(market_snapshot) ← Anthropic Claude
-                 ├─ ExchangeService.place_order()         ← Upbit API (실전만)
-                 └─ DB 기록 (SQLAlchemy async)
+  ├─ /ai실전 커맨드 (bot/cogs/ai_trading.py)
+  │    └─ 엔진 선택: SWING / SCALPING / MAJOR / ALL
+  ├─ /ai모의 커맨드 (bot/cogs/paper_trading.py)
+  │    └─ 엔진 선택: SWING / SCALPING / MAJOR / ALL (ai_engine_mode)
+  └─ AIManagerTask (bot/tasks/ai_manager.py) — 매시 정각 스케줄
+       ├─ MarketDataManager (market_data.py)
+       │    ├─ 1시간 주기: Top10 KRW 코인 4h+1h+15m 지표 캐시
+       │    └─ on-demand fetch: 보유 포지션 캐시 미스 시 즉시 fetch
+       ├─ AITraderService (ai_trader.py)
+       │    ├─ analyze_market(engine_type, weight_pct) — 신규 픽
+       │    └─ review_positions(engine_type) — 기존 포지션 HOLD/UPDATE/SELL
+       ├─ WorkerRegistry + TradingWorker (trading_worker.py)
+       │    └─ 0.5초 폴링 · 익절/손절 자동 실행 · Discord DM 알림
+       └─ ExchangeService (exchange.py) — 실전 매매 전용
 ```
 
-### 2-2. TradingWorker 폴링 루프
+### 2-2. AI 펀드 매니저 사이클 (매시 정각)
 
 ```
-while running:
+매시 정각 실행
   │
-  ├─ [1] 현재가·지표 수집 (MarketDataService)
-  │       fetch_ticker → RSI14, MA20, ATR% 계산
+  ├─ [Step 0] 사용자 필터링
+  │       VIP AND (ai_mode_enabled OR is_major_enabled): 실전 대상
+  │       ai_paper_mode_enabled: 모의 대상
   │
-  ├─ [2] AI 픽 요청 (AITraderService)
-  │       Claude에 JSON 형식 응답 요청
-  │       → { picks: [{ symbol, score, weight_pct, target_profit_pct, stop_loss_pct }] }
+  ├─ [Step 1·2] 기존 포지션 리뷰 (_review_existing_positions)
+  │       _group_by_engine() → trade_style 별 분리 리뷰
+  │       캐시 미스 심볼 → MarketDataManager.fetch_and_cache_symbol() on-demand
+  │       SELL → force_sell() | 실패 시 유저 DM 알림
+  │       UPDATE → target/stop_loss DB 갱신
   │
-  ├─ [3] 포지션 관리
-  │       보유 중: 익절/손절 조건 체크 → 매도 (실전) 또는 기록 (모의)
-  │       미보유: 픽 결과에 따라 매수 (실전) 또는 진입 기록 (모의)
+  ├─ [Step 3-a] SWING 엔진 (is_swing_hour=True)
+  │       analyze_market("SWING") → score≥90 픽 → _buy_new_coins
   │
-  ├─ [4] DB 저장 + Discord 알림
+  ├─ [Step 3-b] SCALPING 엔진 (매 사이클)
+  │       analyze_market("SCALPING") → score≥90 픽 → _buy_new_coins
   │
-  └─ asyncio.sleep(POLL_INTERVAL=0.5)
+  ├─ [Step 3-c] MAJOR 엔진 (is_swing_hour=True AND is_major_on)
+  │       3중 기계적 필터 (EMA200·정배열·BB상단돌파)
+  │       통과 종목 → analyze_market("MAJOR_TREND")
+  │       통과 없어도 DM에 관망 한 줄 표시
+  │
+  ├─ [Step 4] DM 리포트 전송
+  │       엔진별 섹션 통합 임베드 (엔진 태그 정확 표시)
+  │
+  └─ 에러 처리
+          잔고 조회 실패 → 신규 매수 스킵 + 유저 DM
+          DB 삽입 실패(실전) → 고아 포지션 방지 알림 DM
+          force_sell 실패 → 수동 확인 요청 DM
 ```
+
+### 2-3. 매시간 AI 포지션 리뷰 채점 기준
+
+| 기준 | 설명 |
+|---|---|
+| **① 진행률 기반 본절 이동** | 목표 대비 50% 이상 달성 시 손절가를 매수가(0%)로 이동 — 리스크 프리 상태 |
+| **② 모멘텀 관성 평가** | RSI·MA 추세 유지 여부로 지속성 판단. 강한 모멘텀 시 목표 상향 가능 |
+| **③ ATR 대비 손절폭 검증** | ATR 급증 시 손절 확대 또는 즉시 청산. 변동성 정상화 시 손절 복원 |
+
+> 리뷰 액션: **HOLD** (유지) / **UPDATE** (목표·손절 조정) / **SELL** (즉시 청산)
+> MAJOR 엔진: 4h 봉 최우선 평가, 1h 노이즈 과반응 금지
 
 ---
 
@@ -125,7 +157,28 @@ flowchart TD
 
 ---
 
-## 4. 매매 전략 (고승률 스나이퍼)
+## 4. 엔진별 전략 요약
+
+### 4-0. V2 엔진 매트릭스
+
+| 엔진 | 대상 | 타임프레임 | 실행 주기 | 손절 상한 |
+|---|---|---|---|---|
+| **SWING** | 알트코인 전체 (메이저 제외) | 4h 봉 우선 | 6회/일 (스윙 시간대) | 동적 ATR 기반 |
+| **SCALPING** | 알트코인 전체 (메이저 제외) | 1h 봉 우선 | 24회/일 | ≤ 2.0% 하드 상한 |
+| **MAJOR** | BTC/ETH/XRP/BNB/SOL/DOGE/ADA/SUI | 4h 봉 최우선 | 6회/일 (스윙 시간대) | 동적 ATR 기반 |
+| **ALL** | 알트+메이저 동시 | 엔진별 분리 | 각 엔진 일정대로 | 엔진별 |
+
+### 4-1. MAJOR 3중 기계적 필터
+
+```
+1. Close > EMA200   — 장기 추세 상방
+2. EMA20 > EMA50    — 단·중기 정배열
+3. Close > BB상단   — 볼린저밴드(20, 2.0σ) 상단 돌파
+```
+
+조건 3개 모두 통과 시에만 AI 분석 진행. 통과 없으면 "전체 관망" DM 표시.
+
+## 5. 매매 전략 (고승률 스나이퍼)
 
 ### 4-1. 시스템 프롬프트 핵심 룰
 
@@ -168,7 +221,7 @@ CSV 컬럼:
 
 ---
 
-## 5. CLI 옵션 (backtester.py)
+## 6. CLI 옵션 (backtester.py)
 
 ```bash
 python scripts/backtester.py \
@@ -183,7 +236,7 @@ python scripts/backtester.py \
 
 ---
 
-## 6. 환경변수 (.env)
+## 7. 환경변수 (.env)
 
 ```
 # AI 모델 API 키
@@ -201,4 +254,19 @@ DATABASE_URL=postgresql+asyncpg://...
 
 ---
 
-*최종 수정: 2026-03-17*
+---
+
+## 8. MarketDataManager 캐시 전략
+
+| 모드 | 설명 |
+|---|---|
+| **정기 캐시 (1h 주기)** | Top10 KRW 거래대금 코인 → 4h+1h+15m OHLCV 일괄 fetch |
+| **on-demand fetch** | 보유 포지션 심볼이 캐시에 없을 때 (MAJOR 코인 등) 즉시 단일 fetch |
+| **캐시 병합** | on-demand 결과는 기존 Top10 캐시에 merge (덮어쓰기 X) |
+
+> `fetch_and_cache_symbol(symbol)`: 단일 심볼 4h+1h+15m 지표 즉시 fetch 후 `self._cache[symbol]` 갱신
+> `_review_existing_positions()` 진입 시 자동으로 캐시 미스 탐지 → on-demand fetch 실행
+
+---
+
+*최종 수정: 2026-03-25*
