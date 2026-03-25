@@ -832,6 +832,21 @@ class AIFundManagerTask(commands.Cog):
             logger.info("AI 포지션 리뷰 결과 없음: user_id=%s", user_id)
             return
 
+        # ── Ghost Update 방지: AI 응답 수신 직후 생존 포지션 재검증 ──────────
+        # review_positions() 호출(AI 왕복) 중 TradingWorker가 TP/SL 청산을 완료하고
+        # BotSetting.is_running=False 로 바꿨을 수 있다.
+        # 단 1회의 IN 쿼리로 현재도 is_running=True 인 setting_id 집합을 구한다.
+        _all_setting_ids = [p["setting_id"] for p in positions_data]
+        async with AsyncSessionLocal() as _chk_db:
+            _chk_result = await _chk_db.execute(
+                select(BotSetting.id).where(
+                    BotSetting.id.in_(_all_setting_ids),
+                    BotSetting.is_running.is_(True),
+                )
+            )
+            _surviving_ids: set[int] = {row[0] for row in _chk_result.all()}
+        # ─────────────────────────────────────────────────────────────────────
+
         for review in reviews:
             symbol  = review["symbol"]
             action  = review["action"]
@@ -845,6 +860,16 @@ class AIFundManagerTask(commands.Cog):
 
             setting_id = pos["setting_id"]
 
+            # ── Ghost Update 차단: 이미 워커가 청산한 포지션 처리 금지 ─────
+            if setting_id not in _surviving_ids:
+                logger.info(
+                    "Ghost Update 방지: AI 평가 중 워커에 의해 포지션이 종료되어 "
+                    "갱신을 취소함 — user_id=%s symbol=%s action=%s",
+                    user_id, symbol, action,
+                )
+                continue  # DB 업데이트·리포트 추가 없이 완전 폐기
+            # ──────────────────────────────────────────────────────────────
+
             if action == "SELL":
                 # 긴급 청산: 워커를 통한 즉시 시장가 매도 후 레지스트리 제거
                 worker = registry.get_worker(setting_id)
@@ -852,6 +877,7 @@ class AIFundManagerTask(commands.Cog):
                     sell_ok = await worker.force_sell(f"🤖 AI 긴급 청산: {reason}")
                     if sell_ok:
                         registry._workers.pop(setting_id, None)
+                        _surviving_ids.discard(setting_id)  # 동일 사이클 중복 처리 방지
                         logger.info(
                             "AI 긴급 청산 완료: user_id=%s symbol=%s profit_pct=%.2f%%",
                             user_id, symbol, pos["profit_pct"],
