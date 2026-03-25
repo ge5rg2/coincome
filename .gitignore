@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 *.log
 *.db
+# 에이전트 세션 간 임시 동기화 파일 (세션 종료 시 생성, 다음 세션 시작 시 소비)
+.claude/sync_pending.md

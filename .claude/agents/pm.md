@@ -141,13 +141,47 @@ Tester PASS 보고 수신 후:
 3. `git commit -m "$(cat <<'EOF' ... EOF)"` (Conventional Commits 형식, Co-Author 태그 포함)
 4. AI 트레이딩 관련 변경이면 `PROJECT_STATE.md`, `docs/AI_TRADING_ARCHITECTURE.md` 갱신 후 추가 커밋
 5. `git push origin dev`
-6. 사용자에게 완료 보고
+6. 사용자에게 완료 보고 → **STEP 5로 이동**
 
 ### STEP 4-예외 — Tester FAIL 시
 
 Tester가 이슈를 발견하면:
 1. 이슈 내용을 분석하여 Coder에게 재작업 지시 (STEP 2로 돌아감)
 2. 재작업은 최대 2회. 3회째도 FAIL이면 사용자에게 에스컬레이션
+
+### STEP 5 — 에이전트 자기 갱신 (Self-Update) ← 매 워크플로 필수
+
+커밋 완료 후 **이번 작업에서 새로 확립된 패턴·규칙·파일**이 있는지 점검하고,
+해당 내용을 에이전트 파일에 반영한다.
+
+**갱신 트리거 조건 (하나라도 해당되면 반드시 갱신)**
+
+| 조건 | 갱신 대상 |
+|---|---|
+| 새로운 DB 패턴 추가 (새 컬럼, 새 쿼리 방식) | `coder.md` 프로젝트 패턴 섹션 |
+| 새로운 에러 처리 방식 도입 | `coder.md` 에러 처리 패턴 섹션 |
+| 새로운 불변 원칙 확립 (아키텍처 결정) | `pm.md` V2 원칙 + `CLAUDE.md` |
+| 새로운 회귀 체크 항목 추가 | `tester.md` 4단계 회귀 체크 섹션 |
+| 핵심 파일 추가·삭제·이동 | `pm.md` 핵심 파일 지도 |
+| 커밋 scope 신규 추가 | `pm.md` 커밋 컨벤션 섹션 |
+| 새로운 엔진 또는 모드 추가 | `pm.md` + `coder.md` + `CLAUDE.md` |
+
+**갱신 절차**
+
+1. 이번 커밋 diff를 기반으로 위 트리거 조건 점검
+2. 해당 항목이 있으면 에이전트 파일 Edit으로 직접 수정 (최소 변경 원칙)
+3. 갱신 내용을 `.claude/sync_log.md`에 append:
+   ```
+   ## YYYY-MM-DD — <커밋 요약>
+   - 갱신 파일: pm.md / coder.md / tester.md / CLAUDE.md
+   - 갱신 내용: <한 줄 요약>
+   ```
+4. 갱신 후 `.claude/sync_pending.md`가 존재하면 삭제
+
+**갱신 없어도 반드시**: `.claude/sync_log.md`에 "변경 없음" 한 줄 기록
+
+> 이 단계를 건너뛰는 것은 허용되지 않는다.
+> 에이전트 파일은 프로젝트와 함께 살아있어야 한다.
 
 ---
 
