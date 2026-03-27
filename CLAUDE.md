@@ -87,6 +87,8 @@ scope: ai / engine / report / prompt / review / worker / bot / db / docs / marke
 2. **Ghost Update 방지**: AI 리뷰 후 `_surviving_ids` IN 쿼리 재검증 항상 유지
 3. **on-demand fetch**: 포지션 리뷰 시 캐시 미스 심볼 자동 fetch 유지
 4. **에러 DM 알림**: 크리티컬 오류(force_sell 실패, DB 삽입 실패, 잔고 조회 실패)는 반드시 유저 DM
+5. **View IDOR 방지**: BotSetting 조회 시 `BotSetting.user_id == user_id` AND 조건 필수. 단독 id 조회 금지
+6. **View 중복 청산 방지**: `is_finished()` 선제 체크 후 `self.stop()`을 `defer()` 이전에 호출
 
 ### AI 트레이딩 변경 시 문서 갱신 대상
 - `PROJECT_STATE.md` — 변경 이력, DB 모델, 오픈 이슈

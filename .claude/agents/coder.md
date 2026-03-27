@@ -155,6 +155,50 @@ for review in reviews:
         continue
 ```
 
+### discord.ui.View 보안 패턴 (절대 원칙)
+
+```python
+# ✅ IDOR 방지: BotSetting 조회 시 user_id AND 조건 필수
+# 단독으로 BotSetting.id만 조회하면 공격자가 타인의 setting_id 주입 가능
+async with AsyncSessionLocal() as db:
+    result = await db.execute(
+        select(BotSetting).where(
+            BotSetting.id == setting_id,
+            BotSetting.user_id == self._user_id,   # ← 반드시 포함
+        )
+    )
+    setting = result.scalar_one_or_none()
+
+# ✅ 중복 청산(Race Condition) 방지: is_finished() 선제 체크 + self.stop() defer 이전 호출
+async def _handle_sell(self, interaction: discord.Interaction) -> None:
+    # 1. 권한 체크
+    if str(interaction.user.id) != self._user_id:
+        await interaction.response.send_message("권한 없음", ephemeral=True)
+        return
+
+    # 2. 선제 is_finished() 체크 (이미 stop된 View 재진입 차단)
+    if self.is_finished():
+        await interaction.response.send_message("이미 처리된 요청입니다.", ephemeral=True)
+        return
+
+    # 3. self.stop() 먼저 — defer() 이전에 호출해야 후속 요청 차단
+    self.stop()
+
+    # 4. DB 재검증 (IDOR 방지 포함)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(BotSetting).where(
+                BotSetting.id == setting_id,
+                BotSetting.user_id == self._user_id,
+            )
+        )
+        setting = result.scalar_one_or_none()
+
+    # 5. defer 및 청산 로직
+    await interaction.response.defer(ephemeral=True)
+    # ... 청산 실행
+```
+
 ### 실전/모의 플래그 격리 (절대 원칙)
 
 ```python
