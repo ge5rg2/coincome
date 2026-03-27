@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-25 (최종 수정: 2026-03-25 — V2 MAJOR 엔진 완성 · 실전/모의 플래그 격리 · on-demand 지표 fetch · 에러 알림 강화)
+> **기준일**: 2026-03-26 (최종 수정: 2026-03-26 — 수동 청산 Manual Override UI · ManualSellView · _send_dm_embed view 파라미터 추가)
 > **현재 작업 브랜치**: `dev`
 > **최신 안정 브랜치**: `main` (커밋 `d11a0fd`)
 
@@ -296,7 +296,8 @@ coincome/
 
 | 커밋        | 날짜       | 내용                                                                                                                                                                                                                                                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| (최신)      | 2026-03-25 | fix(review): Ghost Update 방지 — AI 리뷰 응답 직후 생존 포지션 IN 쿼리 재검증, 워커가 청산한 포지션의 DB UPDATE·DM 리포트 완전 차단, SELL 성공 시 _surviving_ids 즉시 제거 |
+| `a91c673`   | 2026-03-26 | feat(bot): AI 리포트 하단 수동 청산(Manual Override) UI 추가 — ManualSellView (Select Menu + 즉시 청산 버튼), Race Condition 방지 DB 재검증, 실전/모의 분기, _send_dm_embed view 파라미터 확장 |
+| (이전)      | 2026-03-25 | fix(review): Ghost Update 방지 — AI 리뷰 응답 직후 생존 포지션 IN 쿼리 재검증, 워커가 청산한 포지션의 DB UPDATE·DM 리포트 완전 차단, SELL 성공 시 _surviving_ids 즉시 제거 |
 | `35aa249`   | 2026-03-25 | fix(engine): MAJOR 엔진 리뷰 완전성 보장 + 에러 알림 강화 — MarketDataManager on-demand fetch, force_sell·DB삽입·잔고조회 실패 DM 알림, 연착륙 종료 is_major_enabled=False, _review_existing_positions 캐시 미스 자동 보완 |
 | `9e36275`   | 2026-03-25 | fix(prompt): SWING·SCALPING 언행일치 규칙 + 리스크 감점 + Self-Check 강제 주입 |
 | `70e0803`   | 2026-03-25 | feat(report): 비스윙 시간대 메이저 트렌드 엔진 대기 안내 추가 |
@@ -340,7 +341,8 @@ coincome/
 
 | 우선순위 | 항목                                                                                                                                               | 관련 브랜치      |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| 🔴 높음  | **`dev` → `main` PR 생성** — V2 MAJOR 엔진 + 에러 알림 강화 배포 (`35aa249` 기준)                                                                 | `dev` → `main`   |
+| 🔴 높음  | **`dev` → `main` PR 생성** — V2 MAJOR 엔진 + Manual Override UI 배포 (`a91c673` 기준)                                                              | `dev` → `main`   |
+| 🟡 보통  | **ManualSellView 검증** — DM View 동작 확인, 봇 재시작 후 timeout 처리 검증, 실전/모의 청산 로그 확인                                               | `dev`            |
 | 🔴 높음  | **Forward Testing 실시간 검증** — SWING/SCALPING/MAJOR 엔진 모의투자 가동 후 수익률·엔진 태그 정확도 확인                                          | `dev`            |
 | 🟡 보통  | **MAJOR 엔진 Alembic 마이그레이션 검증** — `is_major_enabled`, `major_budget`, `major_trade_ratio` 컬럼 운영 DB 반영 확인                           | `dev`            |
 | 🟡 보통  | AI 매매 성과 리포트 (실전 이력 집계 → Discord DM, trade_history 테이블 활용)                                                                       | 신규 브랜치 필요 |
