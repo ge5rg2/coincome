@@ -146,6 +146,17 @@ class ManualSellView(discord.ui.View):
             )
             return
 
+        # 이미 처리 중이거나 stop된 경우 즉시 차단
+        if self.is_finished():
+            await interaction.response.send_message(
+                "이미 처리된 요청입니다.",
+                ephemeral=True,
+            )
+            return
+
+        # 즉시 View를 중단하여 후속 요청 차단 (DB 재조회 전에 호출)
+        self.stop()
+
         # Select가 선택되지 않은 경우
         if self._selected_id is None:
             await interaction.response.send_message(
@@ -160,7 +171,10 @@ class ManualSellView(discord.ui.View):
         try:
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
-                    select(BotSetting).where(BotSetting.id == setting_id)
+                    select(BotSetting).where(
+                        BotSetting.id == setting_id,
+                        BotSetting.user_id == self._user_id,
+                    )
                 )
                 setting = result.scalar_one_or_none()
         except Exception as exc:
@@ -201,9 +215,6 @@ class ManualSellView(discord.ui.View):
 
         # ── 즉시 defer: 청산이 오래 걸릴 수 있으므로 먼저 응답 ───────
         await interaction.response.defer(ephemeral=True)
-
-        # ── View 비활성화 (중복 청산 방지) ───────────────────────────
-        self.stop()
 
         # ── 실전 청산: TradingWorker.force_sell() 재사용 ─────────────
         if not is_paper:
@@ -366,7 +377,10 @@ class ManualSellView(discord.ui.View):
             # 5. BotSetting 포지션 초기화
             async with AsyncSessionLocal() as db:
                 bs_result = await db.execute(
-                    select(BotSetting).where(BotSetting.id == setting.id)
+                    select(BotSetting).where(
+                        BotSetting.id == setting.id,
+                        BotSetting.user_id == self._user_id,
+                    )
                 )
                 bs = bs_result.scalar_one_or_none()
                 if bs is not None:

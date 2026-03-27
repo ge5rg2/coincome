@@ -337,3 +337,112 @@ class ReportCog(commands.Cog):
             parts.append("_(주기 변경으로 다음 루프에서 즉시 보고가 전송됩니다)_")
 
         await interaction.response.send_message("\n".join(parts), ephemeral=True)
+
+    # ------------------------------------------------------------------
+    # /내포지션 슬래시 커맨드
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="내포지션",
+        description="현재 보유 중인 AI 자동매매 포지션을 조회하고 수동 청산할 수 있습니다.",
+    )
+    async def my_positions_command(
+        self,
+        interaction: discord.Interaction,
+    ) -> None:
+        """보유 중인 포지션(is_running=True, buy_price IS NOT NULL)을 조회해
+        Embed + ManualSellView로 응답한다.
+
+        포지션이 없으면 ephemeral 텍스트만 반환한다.
+        포지션이 있으면 요약 Embed + ManualSellView(수동 청산 UI)를 ephemeral로 반환한다.
+        """
+        user_id = str(interaction.user.id)
+
+        # ── DB 조회 ─────────────────────────────────────────────────
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(BotSetting).where(
+                        BotSetting.user_id == user_id,
+                        BotSetting.is_running.is_(True),
+                        BotSetting.buy_price.is_not(None),
+                    )
+                )
+                settings: list[BotSetting] = result.scalars().all()
+        except Exception as exc:
+            logger.error("내포지션 DB 조회 실패: user_id=%s err=%s", user_id, exc)
+            await interaction.response.send_message(
+                "포지션 조회 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
+        logger.info("내포지션 조회: user_id=%s count=%d", user_id, len(settings))
+
+        if not settings:
+            await interaction.response.send_message(
+                "현재 보유 중인 포지션이 없습니다.",
+                ephemeral=True,
+            )
+            return
+
+        # ── Embed 빌드 ───────────────────────────────────────────────
+        ws_manager = UpbitWebsocketManager.get()
+        embed = discord.Embed(
+            title="📊 내 포지션 현황",
+            description="현재 자동매매 중인 포지션 목록입니다.",
+            color=discord.Color.blue(),
+        )
+
+        positions: list[dict] = []
+        for s in settings:
+            ws_price = ws_manager.get_price(s.symbol)
+            mode_tag = "[모의]" if s.is_paper_trading else "[실전]"
+            buy_price_f = float(s.buy_price)
+
+            if ws_price is not None:
+                profit_pct = (float(ws_price) - buy_price_f) / buy_price_f * 100
+                status_icon = "🟢" if profit_pct >= 0 else "🔴"
+                profit_str = f"{status_icon} **{profit_pct:+.2f}%**"
+                current_price_str = f"{format_krw_price(ws_price)} KRW"
+            else:
+                profit_pct = 0.0
+                profit_str = "-"
+                current_price_str = "조회 중..."
+
+            amount_str = (
+                f"{float(s.amount_coin):.6f}" if s.amount_coin is not None else "-"
+            )
+
+            embed.add_field(
+                name=f"{mode_tag} {s.symbol}",
+                value=(
+                    f"**매수가:** {format_krw_price(buy_price_f)} KRW\n"
+                    f"**현재가:** {current_price_str}\n"
+                    f"**수익률:** {profit_str}\n"
+                    f"**수량:** {amount_str}"
+                ),
+                inline=False,
+            )
+
+            positions.append({
+                "setting_id": s.id,
+                "symbol": s.symbol,
+                "is_paper": s.is_paper_trading,
+                "profit_pct": profit_pct,
+            })
+
+        embed.set_footer(
+            text="포지션을 선택 후 [즉시 청산] 버튼을 눌러 수동 청산할 수 있습니다."
+        )
+
+        # ── ManualSellView 부착 (지역 import — 순환 임포트 방지) ─────
+        from app.bot.views.manual_sell_view import ManualSellView  # noqa: PLC0415
+
+        view = ManualSellView(bot=self.bot, user_id=user_id, positions=positions)
+
+        await interaction.response.send_message(
+            embed=embed,
+            view=view,
+            ephemeral=True,
+        )

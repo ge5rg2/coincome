@@ -37,6 +37,7 @@ app/
 │   └── cogs/
 │       ├── ai_trading.py        ← /ai실전 Discord 커맨드
 │       ├── paper_trading.py     ← /ai모의 Discord 커맨드
+│       ├── report.py            ← /내포지션 커맨드 (포지션 조회 + ManualSellView 응답)
 │       └── settings.py          ← /도움말·/설정 커맨드
 ├── services/
 │   ├── ai_trader.py             ← Anthropic API 호출 · 프롬프트 엔진
@@ -62,6 +63,8 @@ PROJECT_STATE.md                 ← 프로젝트 현황 문서
 - **on-demand fetch**: 보유 포지션 심볼이 캐시 미스면 `fetch_and_cache_symbol()` 즉시 호출
 - **에러 DM 알림**: `force_sell` 실패, DB 삽입 실패, 잔고 조회 실패 시 반드시 유저 DM
 - **View 콜백 DB 재검증**: discord.ui.View 버튼/셀렉트 콜백에서 is_running + buy_price를 DB에서 재조회 후 검증 (Race Condition 방지 필수)
+- **View IDOR 방지**: BotSetting 조회 시 `BotSetting.id == setting_id` 단독 조건 금지. 반드시 `BotSetting.user_id == self._user_id` AND 조건 병기. 모든 BotSetting 조회 위치에 적용
+- **View 중복 청산 방지**: View 콜백 진입 즉시 `if self.is_finished(): return` 선제 체크 후, `interaction.response.defer()` 이전에 `self.stop()` 호출하여 critical section 진입 전 후속 요청 차단
 - **순환 임포트 방지**: ai_manager.py에서 views 모듈 import 시 함수 내부 지역 import 사용
 
 ### 커밋 컨벤션 (Conventional Commits)

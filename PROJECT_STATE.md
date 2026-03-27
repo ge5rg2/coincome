@@ -296,6 +296,8 @@ coincome/
 
 | 커밋        | 날짜       | 내용                                                                                                                                                                                                                                                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `4044201`   | 2026-03-27 | fix(bot): ManualSellView IDOR·중복청산 보안 취약점 패치 — BotSetting.user_id AND 조건(L174·L381), is_finished() 선제 체크 + self.stop() defer() 이전 이동으로 Race Condition 차단 |
+| `17bf07b`   | 2026-03-27 | feat(bot): /내포지션 슬래시 커맨드 신설 — DB 조회 + ManualSellView ephemeral 응답, 포지션 없으면 안내 메시지 |
 | `a91c673`   | 2026-03-26 | feat(bot): AI 리포트 하단 수동 청산(Manual Override) UI 추가 — ManualSellView (Select Menu + 즉시 청산 버튼), Race Condition 방지 DB 재검증, 실전/모의 분기, _send_dm_embed view 파라미터 확장 |
 | (이전)      | 2026-03-25 | fix(review): Ghost Update 방지 — AI 리뷰 응답 직후 생존 포지션 IN 쿼리 재검증, 워커가 청산한 포지션의 DB UPDATE·DM 리포트 완전 차단, SELL 성공 시 _surviving_ids 즉시 제거 |
 | `35aa249`   | 2026-03-25 | fix(engine): MAJOR 엔진 리뷰 완전성 보장 + 에러 알림 강화 — MarketDataManager on-demand fetch, force_sell·DB삽입·잔고조회 실패 DM 알림, 연착륙 종료 is_major_enabled=False, _review_existing_positions 캐시 미스 자동 보완 |
