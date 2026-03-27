@@ -744,7 +744,31 @@ class AIFundManagerTask(commands.Cog):
             paper_position_count=len(paper_running) + len(paper_bought),
             is_swing_hour=is_swing_hour,
         )
-        await self._send_dm_embed(user_id, embed)
+
+        # ── ManualSellView: 리포트 하단에 수동 청산 UI 부착 ──────────
+        # 실전 + 모의 전체 running 포지션 중 buy_price가 있는 것만 선택지로 구성한다.
+        # 지역 import: 순환 임포트(ai_manager → views → trading_worker → ...) 방지
+        from app.bot.views.manual_sell_view import ManualSellView  # noqa: PLC0415
+
+        _sell_positions: list[dict] = []
+        for _s in real_running + paper_running:
+            if _s.buy_price is not None:
+                _ws_price = ws_manager.get_price(_s.symbol)
+                _profit = (
+                    (float(_ws_price) - float(_s.buy_price)) / float(_s.buy_price) * 100
+                    if _ws_price else 0.0
+                )
+                _sell_positions.append({
+                    "setting_id": _s.id,
+                    "symbol": _s.symbol,
+                    "is_paper": _s.is_paper_trading,
+                    "profit_pct": _profit,
+                })
+        _sell_view = (
+            ManualSellView(bot=self.bot, user_id=user_id, positions=_sell_positions)
+            if _sell_positions else None
+        )
+        await self._send_dm_embed(user_id, embed, view=_sell_view)
 
     # ------------------------------------------------------------------
     # Step 1·2: 기존 포지션 리뷰 (실전·모의 공용)
@@ -1717,17 +1741,23 @@ class AIFundManagerTask(commands.Cog):
     # DM 전송 (Embed, 최대 3회 재시도)
     # ------------------------------------------------------------------
 
-    async def _send_dm_embed(self, user_id: str, embed: discord.Embed) -> None:
+    async def _send_dm_embed(
+        self,
+        user_id: str,
+        embed: discord.Embed,
+        view: discord.ui.View | None = None,
+    ) -> None:
         """사용자에게 Embed DM을 전송한다. HTTPException 시 최대 3회 재시도.
 
         Args:
             user_id: Discord 사용자 ID (문자열).
             embed:   전송할 discord.Embed 객체.
+            view:    첨부할 discord.ui.View (수동 청산 UI 등). None이면 View 없이 전송.
         """
         for attempt in range(1, 4):
             try:
                 user = await self.bot.fetch_user(int(user_id))
-                await user.send(embed=embed)
+                await user.send(embed=embed, view=view)
                 return
             except discord.Forbidden:
                 logger.warning("AI 리포트 DM 거부됨 (DM 차단): user_id=%s", user_id)
