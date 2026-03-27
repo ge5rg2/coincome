@@ -1464,18 +1464,10 @@ class AIFundManagerTask(commands.Cog):
         else:
             desc = "관망 중"
 
-        embed = discord.Embed(
-            title=f"🤖 AI 종합 리포트 [{style_label}]",
-            description=desc,
-            color=color,
-        )
-
         # ── AI 시장 분석 요약 (ALL + 비스윙 시각이면 대기 안내 추가) ─
-        # ALL 모드이고 스윙 시간대가 아니면, 스캘핑 분석 결과만 있으므로
-        # 유저가 "스윙 고장?" 오해하지 않도록 명시적 안내 문구를 붙인다.
+        # Description 에 직접 넣어 4096자 한계 활용 (add_field 는 1024자 제한)
         _summary_display = market_summary or "분석 결과를 가져오지 못했습니다."
         if swing_is_idle:
-            # ALL 모드: 스윙·메이저 모두 4h 주기 → 비스윙 시각에는 둘 다 대기 안내
             _idle_notices = (
                 "💤 **알트 스윙 엔진**: 현재 캔들 형성 대기 중 "
                 "(다음 4h 분석 시각에 가동)\n"
@@ -1488,11 +1480,48 @@ class AIFundManagerTask(commands.Cog):
                 else _idle_notices
             )
 
-        embed.add_field(
-            name="📊 AI 시장 분석 요약",
-            value=_summary_display,
-            inline=False,
+        embed = discord.Embed(
+            title=f"🤖 AI 종합 리포트 [{style_label}]",
+            description=f"{desc}\n\n📊 **AI 시장 분석 요약**\n{_summary_display}",
+            color=color,
         )
+
+        # ── reason 텍스트 100자 Truncate 헬퍼 ────────────────────────
+        def _trunc(text: str, limit: int = 100) -> str:
+            return text if len(text) <= limit else text[:limit] + "…"
+
+        # ── HOLD 항목을 900자 단위로 add_field 분할하는 헬퍼 ─────────
+        def _add_hold_fields(
+            embed: discord.Embed,
+            hold_items: list[dict],
+            name_base: str,
+            paper: bool = False,
+        ) -> None:
+            lines = [
+                f"• **{r['symbol']}** — {r['profit_pct']:+.2f}%"
+                f" {'📈' if r['profit_pct'] >= 0 else '📉'} — {_trunc(r['reason'])}"
+                for r in hold_items
+            ]
+            chunks: list[list[str]] = []
+            cur: list[str] = []
+            cur_len = 0
+            for line in lines:
+                if cur_len + len(line) + 1 > 900 and cur:
+                    chunks.append(cur)
+                    cur = [line]
+                    cur_len = len(line)
+                else:
+                    cur.append(line)
+                    cur_len += len(line) + 1
+            if cur:
+                chunks.append(cur)
+            for i, chunk in enumerate(chunks):
+                suffix = f" ({i + 1})" if len(chunks) > 1 else ""
+                embed.add_field(
+                    name=f"{name_base}{suffix}",
+                    value="\n".join(chunk),
+                    inline=False,
+                )
 
         # ── 포트폴리오 현황 (실전·모의 각각 [현재/최대] 슬롯 표시) ──
         portfolio_parts: list[str] = []
@@ -1549,7 +1578,7 @@ class AIFundManagerTask(commands.Cog):
                         name=f"🪙 {item['symbol']} {_engine_tag(item)} [긴급청산]",
                         value=(
                             f"**청산 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
-                            f"**AI 판단:** {item['reason']}"
+                            f"**AI 판단:** {_trunc(item['reason'])}"
                         ),
                         inline=False,
                     )
@@ -1572,7 +1601,7 @@ class AIFundManagerTask(commands.Cog):
                             f"  |  **비중:** {item.get('weight_pct', 0):.1f}%\n"
                             f"**익절:** +{item['target_profit_pct']:.1f}%  |  "
                             f"**손절:** -{item['stop_loss_pct']:.1f}%\n"
-                            f"**AI 분석:** {item['reason']}"
+                            f"**AI 분석:** {_trunc(item['reason'])}"
                         ),
                         inline=False,
                     )
@@ -1593,23 +1622,17 @@ class AIFundManagerTask(commands.Cog):
                             f"**현재 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
                             f"**새 익절:** +{item['new_target']:.1f}%  |  "
                             f"**새 손절:** -{item['new_sl']:.1f}%\n"
-                            f"**AI 판단:** {item['reason']}"
+                            f"**AI 판단:** {_trunc(item['reason'])}"
                         ),
                         inline=False,
                     )
 
-            # 기존 유지 (HOLD)
+            # 기존 유지 (HOLD) — 900자 초과 시 동적 분할
             maintained_real = [r for r in real_reviewed if r["action"] == "HOLD"]
             if maintained_real:
-                lines = [
-                    f"• **{r['symbol']}** — {r['profit_pct']:+.2f}%"
-                    f" {'📈' if r['profit_pct'] >= 0 else '📉'} — {r['reason']}"
-                    for r in maintained_real
-                ]
-                embed.add_field(
-                    name=f"✅ 실전 기존 유지 ({len(maintained_real)}건)",
-                    value="\n".join(lines),
-                    inline=False,
+                _add_hold_fields(
+                    embed, maintained_real,
+                    f"✅ 실전 기존 유지 ({len(maintained_real)}건)",
                 )
 
             # 실전 완전 관망 (엔진 상태에 따라 안내 문구 분기)
@@ -1649,7 +1672,7 @@ class AIFundManagerTask(commands.Cog):
                         name=f"🪙 {item['symbol']} {_engine_tag(item, paper=True)} [긴급청산]",
                         value=(
                             f"**청산 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
-                            f"**AI 판단:** {item['reason']}"
+                            f"**AI 판단:** {_trunc(item['reason'])}"
                         ),
                         inline=False,
                     )
@@ -1673,7 +1696,7 @@ class AIFundManagerTask(commands.Cog):
                             f"  |  **비중:** {item.get('weight_pct', 0):.1f}%\n"
                             f"**익절:** +{item['target_profit_pct']:.1f}%  |  "
                             f"**손절:** -{item['stop_loss_pct']:.1f}%\n"
-                            f"**AI 분석:** {item['reason']}"
+                            f"**AI 분석:** {_trunc(item['reason'])}"
                         ),
                         inline=False,
                     )
@@ -1694,23 +1717,18 @@ class AIFundManagerTask(commands.Cog):
                             f"**현재 수익률:** {item['profit_pct']:+.2f}% {icon}\n"
                             f"**새 익절:** +{item['new_target']:.1f}%  |  "
                             f"**새 손절:** -{item['new_sl']:.1f}%\n"
-                            f"**AI 판단:** {item['reason']}"
+                            f"**AI 판단:** {_trunc(item['reason'])}"
                         ),
                         inline=False,
                     )
 
-            # 모의 기존 유지 (HOLD)
+            # 모의 기존 유지 (HOLD) — 900자 초과 시 동적 분할
             maintained_paper = [r for r in paper_reviewed if r["action"] == "HOLD"]
             if maintained_paper:
-                lines = [
-                    f"• **{r['symbol']}** — {r['profit_pct']:+.2f}%"
-                    f" {'📈' if r['profit_pct'] >= 0 else '📉'} — {r['reason']}"
-                    for r in maintained_paper
-                ]
-                embed.add_field(
-                    name=f"✅ [🎮모의] 기존 유지 ({len(maintained_paper)}건)",
-                    value="\n".join(lines),
-                    inline=False,
+                _add_hold_fields(
+                    embed, maintained_paper,
+                    f"✅ [🎮모의] 기존 유지 ({len(maintained_paper)}건)",
+                    paper=True,
                 )
 
             # 모의 완전 관망 (엔진 상태에 따라 안내 문구 분기)

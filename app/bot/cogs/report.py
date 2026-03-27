@@ -433,7 +433,7 @@ class ReportCog(commands.Cog):
             })
 
         embed.set_footer(
-            text="포지션을 선택 후 [즉시 청산] 버튼을 눌러 수동 청산할 수 있습니다."
+            text="코인을 선택하면 즉시 청산됩니다 (1-Click)."
         )
 
         # ── ManualSellView 부착 (지역 import — 순환 임포트 방지) ─────
