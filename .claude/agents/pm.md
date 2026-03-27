@@ -32,6 +32,8 @@ model: sonnet
 app/
 ├── bot/
 │   ├── tasks/ai_manager.py      ← AI 펀드 매니저 스케줄러 (매시 정각, 핵심)
+│   ├── views/
+│   │   └── manual_sell_view.py  ← ManualSellView (수동 청산 UI, DM View)
 │   └── cogs/
 │       ├── ai_trading.py        ← /ai실전 Discord 커맨드
 │       ├── paper_trading.py     ← /ai모의 Discord 커맨드
@@ -59,6 +61,8 @@ PROJECT_STATE.md                 ← 프로젝트 현황 문서
 - **Ghost Update 방지**: `review_positions()` 반환 후 `_surviving_ids` IN 쿼리로 재검증
 - **on-demand fetch**: 보유 포지션 심볼이 캐시 미스면 `fetch_and_cache_symbol()` 즉시 호출
 - **에러 DM 알림**: `force_sell` 실패, DB 삽입 실패, 잔고 조회 실패 시 반드시 유저 DM
+- **View 콜백 DB 재검증**: discord.ui.View 버튼/셀렉트 콜백에서 is_running + buy_price를 DB에서 재조회 후 검증 (Race Condition 방지 필수)
+- **순환 임포트 방지**: ai_manager.py에서 views 모듈 import 시 함수 내부 지역 import 사용
 
 ### 커밋 컨벤션 (Conventional Commits)
 ```

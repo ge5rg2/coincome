@@ -5,6 +5,13 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 
 ---
 
+## 2026-03-26 — feat(bot): AI 리포트 수동 청산 Manual Override UI 추가
+- 갱신 파일: pm.md, tester.md
+- 갱신 내용:
+  - pm.md 핵심 파일 지도에 app/bot/views/manual_sell_view.py 추가
+  - pm.md V2 원칙에 "View 콜백 DB 재검증" 및 "순환 임포트 방지" 원칙 추가
+  - tester.md 4단계 회귀 체크에 ManualSellView 콜백 패턴 체크 추가
+
 ## 2026-03-25 — 에이전트 오케스트레이션 초기 세팅
 - 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md (신규 생성)
 - 갱신 내용: PM·Coder·Tester 3단계 에이전트 정의, STEP 5 자기 갱신 워크플로 추가
