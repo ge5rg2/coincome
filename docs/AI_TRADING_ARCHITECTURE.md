@@ -178,6 +178,21 @@ flowchart TD
 
 조건 3개 모두 통과 시에만 AI 분석 진행. 통과 없으면 "전체 관망" DM 표시.
 
+### 4-2. Admin 분석용 TradeHistory 태깅 (2026-03-28 추가)
+
+청산 시 TradeHistory에 아래 컬럼이 자동 저장된다. Admin 대시보드 성과 분석의 기반 데이터.
+
+| 컬럼 | 타입 | 값 | 설명 |
+|---|---|---|---|
+| `close_type` | String(50) | `TP_HIT` / `SL_HIT` / `AI_FORCE_SELL` / `MANUAL_OVERRIDE` | 청산 유형 태그 |
+| `bought_at` | DateTime(tz) | UTC datetime | 매수 체결 시각 (BotSetting에서 이관) |
+| `ai_version` | String(20) | `"v2.0"` | AI 전략 버전 (BotSetting에서 이관) |
+| `expected_price` | Float | 목표 단가 or None | 익절·손절 목표가 — 실제 체결가 비교로 슬리피지 추적 |
+
+BotSetting에도 `bought_at` / `ai_version` 컬럼이 추가되어 포지션 보유 중 임시 보관한다.
+`force_sell(reason, close_type)` — close_type 파라미터 추가 (기본값 `AI_FORCE_SELL`).
+ManualSellView의 force_sell 호출 시 `close_type="MANUAL_OVERRIDE"` 명시 전달.
+
 ## 5. 매매 전략 (고승률 스나이퍼)
 
 ### 4-1. 시스템 프롬프트 핵심 룰
