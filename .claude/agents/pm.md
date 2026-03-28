@@ -46,11 +46,14 @@ app/
 │   └── exchange.py              ← ExchangeService (CCXT 추상화)
 ├── models/
 │   ├── user.py                  ← User, SubscriptionTier, 엔진 플래그
-│   └── bot_setting.py           ← BotSetting (포지션 상태 영속)
+│   ├── bot_setting.py           ← BotSetting (포지션 상태 영속 + Admin 분석용 bought_at/ai_version)
+│   └── trade_history.py         ← TradeHistory (매도 이력 + Admin 분석용 close_type/bought_at/ai_version/expected_price)
 └── utils/
     ├── crypto.py                ← AES-256 API 키 암복호화
     ├── format.py                ← format_krw_price()
     └── time.py                  ← KST 유틸
+scripts/
+│   └── add_admin_analytics_columns.py ← Admin 분석 컬럼 idempotent 마이그레이션
 docs/AI_TRADING_ARCHITECTURE.md  ← 아키텍처 문서
 PROJECT_STATE.md                 ← 프로젝트 현황 문서
 ```
@@ -66,6 +69,7 @@ PROJECT_STATE.md                 ← 프로젝트 현황 문서
 - **View IDOR 방지**: BotSetting 조회 시 `BotSetting.id == setting_id` 단독 조건 금지. 반드시 `BotSetting.user_id == self._user_id` AND 조건 병기. 모든 BotSetting 조회 위치에 적용
 - **View 중복 청산 방지**: View 콜백 진입 즉시 `if self.is_finished(): return` 선제 체크 후, `interaction.response.defer()` 이전에 `self.stop()` 호출하여 critical section 진입 전 후속 요청 차단
 - **순환 임포트 방지**: ai_manager.py에서 views 모듈 import 시 함수 내부 지역 import 사용
+- **Admin 분석 태깅**: TradeHistory INSERT 시 close_type(TP_HIT/SL_HIT/AI_FORCE_SELL/MANUAL_OVERRIDE), bought_at, ai_version, expected_price 필수 포함. force_sell() 호출 시 close_type 파라미터 명시 (수동 청산="MANUAL_OVERRIDE")
 
 ### 커밋 컨벤션 (Conventional Commits)
 ```

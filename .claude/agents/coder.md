@@ -212,6 +212,69 @@ user.is_major_enabled = True   # 절대 금지
 user.ai_mode_enabled = True    # 절대 금지
 ```
 
+### Admin 분석용 TradeHistory 태깅 패턴 (2026-03-28 확립)
+
+```python
+# ✅ BotSetting 생성 시 Admin 분석용 컬럼 세팅 (ai_manager.py _buy_new_coins)
+setting = BotSetting(
+    ...  # 기존 필드
+    bought_at=datetime.datetime.now(datetime.timezone.utc),
+    ai_version="v2.0",
+)
+
+# ✅ force_sell() 호출 시 close_type 명시
+# AI 강제 청산 (기본값)
+await worker.force_sell(reason="🤖 AI 긴급 청산: ...", close_type="AI_FORCE_SELL")
+
+# 수동 청산 (ManualSellView에서)
+await worker.force_sell(reason="🖐️ 수동 청산 (Manual Override)", close_type="MANUAL_OVERRIDE")
+
+# ✅ TradeHistory INSERT 시 Admin 컬럼 포함
+history = TradeHistory(
+    ...  # 기존 필드
+    bought_at=self.bought_at,              # BotSetting에서 이관 (None 허용)
+    close_type=close_type,                  # TP_HIT / SL_HIT / AI_FORCE_SELL / MANUAL_OVERRIDE
+    ai_version=self.ai_version or "v2.0",  # BotSetting에서 이관
+    expected_price=expected_price,          # 목표 단가 (익절·손절 시만, 강제·수동 시 None)
+)
+
+# ✅ close_type 분기 패턴 (_check_exit_conditions)
+close_type: str | None = None
+expected_price: float | None = None
+if pos.target_price and current_price >= pos.target_price:
+    close_type = "TP_HIT"
+    expected_price = pos.target_price
+elif pos.stop_price and current_price <= pos.stop_price:
+    close_type = "SL_HIT"
+    expected_price = pos.stop_price
+```
+
+### 마이그레이션 스크립트 패턴 (scripts/)
+
+```python
+# ✅ idempotent ALTER TABLE — information_schema 기반 존재 확인
+async def _column_exists(session, table: str, column: str) -> bool:
+    result = await session.execute(
+        text("SELECT COUNT(*) FROM information_schema.columns "
+             "WHERE table_name = :tbl AND column_name = :col"),
+        {"tbl": table, "col": column},
+    )
+    return result.scalar() > 0
+
+# ✅ 공통 추가 헬퍼 (여러 테이블에 적용 시 함수화)
+async def _add_columns(db, table, columns, errors):
+    for item in columns:
+        if await _column_exists(db, table, item["column"]):
+            logger.info("  SKIP  %s.%s", table, item["column"])
+            continue
+        try:
+            await db.execute(text(item["ddl"]))
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            errors.append(f"{table}.{item['column']} 추가 실패: {exc}")
+```
+
 ---
 
 ## 금지 사항

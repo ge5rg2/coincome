@@ -5,6 +5,14 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 
 ---
 
+## 2026-03-28 — feat(db): Admin 분석용 TradeHistory·BotSetting 스키마 확장
+- 갱신 파일: pm.md, coder.md, tester.md
+- 갱신 내용:
+  - pm.md 핵심 파일 지도에 trade_history.py, add_admin_analytics_columns.py 추가
+  - pm.md V2 원칙에 "Admin 분석 태깅" 원칙 추가 (close_type/force_sell 파라미터 규칙)
+  - coder.md에 "Admin 분석용 TradeHistory 태깅 패턴" 및 "마이그레이션 스크립트 패턴" 섹션 신규 추가
+  - tester.md 4단계 회귀 체크에 "Admin 분석 태깅 패턴" 항목 추가
+
 ## 2026-03-26 — chore(agents): Tester 보안 점검(공격자 시점) 단계 추가
 - 갱신 파일: tester.md
 - 갱신 내용:
