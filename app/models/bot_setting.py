@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, Numeric, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -39,5 +41,14 @@ class BotSetting(Base):
     trade_style: Mapped[str | None] = mapped_column(String(20), nullable=True)   # "SWING" | "SCALPING"
     ai_score: Mapped[int | None] = mapped_column(Integer, nullable=True)          # 0–100 매력도 점수
     ai_reason: Mapped[str | None] = mapped_column(Text, nullable=True)            # AI 분석 근거 텍스트
+
+    # ── Admin 분석용 임시 보관 컬럼 ──────────────────────────────────
+    # 매수 체결 시 기록, 청산 시 TradeHistory로 이관 후 포지션은 NULL로 초기화.
+    bought_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # 매수 체결 시각 (UTC)
+    ai_version: Mapped[str | None] = mapped_column(
+        String(20), nullable=True, default="v2.0"
+    )  # AI 전략 버전 태그
 
     user: Mapped["User"] = relationship("User", back_populates="bot_settings")

@@ -1195,6 +1195,8 @@ class AIFundManagerTask(commands.Cog):
                             trade_style=engine_type,           # ← AI 메타데이터 (SWING/SCALPING)
                             ai_score=score,
                             ai_reason=pick.get("reason"),
+                            bought_at=datetime.datetime.now(datetime.timezone.utc),  # ← Admin 분석용
+                            ai_version="v2.0",                 # ← Admin 분석용
                         )
                         db.add(setting)
                         await db.commit()

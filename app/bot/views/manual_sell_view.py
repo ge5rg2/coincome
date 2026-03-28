@@ -179,7 +179,10 @@ class ManualSellView(discord.ui.View):
                 return
 
             try:
-                success = await worker.force_sell(reason="🖐️ 수동 청산 (Manual Override)")
+                success = await worker.force_sell(
+                    reason="🖐️ 수동 청산 (Manual Override)",
+                    close_type="MANUAL_OVERRIDE",
+                )
             except Exception as exc:
                 logger.error(
                     "수동 청산 force_sell 예외: user_id=%s setting_id=%s symbol=%s err=%s",
@@ -208,7 +211,10 @@ class ManualSellView(discord.ui.View):
 
         if worker is not None:
             try:
-                success = await worker.force_sell(reason="🖐️ 수동 청산 (Manual Override)")
+                success = await worker.force_sell(
+                    reason="🖐️ 수동 청산 (Manual Override)",
+                    close_type="MANUAL_OVERRIDE",
+                )
                 if success:
                     await interaction.followup.send(
                         f"✅ 청산 처리 완료 — [모의] `{symbol}` 체결 결과는 별도 DM으로 안내됩니다.",
@@ -291,6 +297,10 @@ class ManualSellView(discord.ui.View):
                     trade_style=setting.trade_style,
                     ai_score=setting.ai_score,
                     ai_reason=setting.ai_reason,
+                    bought_at=setting.bought_at,
+                    close_type="MANUAL_OVERRIDE",
+                    ai_version=setting.ai_version or "v2.0",
+                    expected_price=None,
                 )
                 db.add(history)
                 await db.commit()

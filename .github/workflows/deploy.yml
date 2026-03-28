@@ -38,6 +38,13 @@ jobs:
             docker-compose run --rm app python -m scripts.add_major_engine_columns
 
             # ---------------------------------------------------
+            # Admin 분석용 컬럼 추가 (idempotent)
+            #   - trade_history: bought_at / close_type / ai_version / expected_price
+            #   - bot_settings : bought_at / ai_version
+            # ---------------------------------------------------
+            docker-compose run --rm app python -m scripts.add_admin_analytics_columns
+
+            # ---------------------------------------------------
 
             # 3. DB 세팅이 모두 끝났으니, 안전하게 새 봇을 실행!
             docker-compose up -d app

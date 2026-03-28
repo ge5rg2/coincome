@@ -102,6 +102,10 @@ class TradingWorker:
         self._position: Position | None = None
         self._db_refresh_counter: int = 0   # _check_exit_conditions 호출 횟수 카운터
 
+        # ── Admin 분석용 — BotSetting에서 읽어 TradeHistory 이관 시 사용 ──
+        self.bought_at = None      # datetime | None — 매수 체결 시각
+        self.ai_version: str = "v2.0"  # AI 전략 버전 태그
+
     # ------------------------------------------------------------------
     # 라이프사이클
     # ------------------------------------------------------------------
@@ -121,15 +125,22 @@ class TradingWorker:
             self._task.cancel()
         logger.info("워커 태스크 취소: user=%s symbol=%s", self.user_id, self.symbol)
 
-    async def force_sell(self, reason: str = "🤖 AI 강제 청산") -> bool:
-        """AI 리뷰에 의한 강제 시장가 청산을 수행한다.
+    async def force_sell(
+        self,
+        reason: str = "🤖 AI 강제 청산",
+        close_type: str = "AI_FORCE_SELL",
+    ) -> bool:
+        """AI 리뷰 또는 수동 요청에 의한 강제 시장가 청산을 수행한다.
 
         _review_existing_positions 에서 action=SELL 판정 시 외부에서 직접 호출한다.
         내부 _sell() 메서드를 트리거하므로 DB 초기화·TradeHistory INSERT·
         가상 잔고 복원·DM 알림이 일반 익절/손절과 동일한 흐름으로 처리된다.
 
         Args:
-            reason: 매도 사유 문자열 (DM 알림 및 로그에 포함됨).
+            reason:     매도 사유 문자열 (DM 알림 및 로그에 포함됨).
+            close_type: TradeHistory.close_type 태그.
+                        AI 강제 청산 = "AI_FORCE_SELL" (기본값),
+                        수동 청산    = "MANUAL_OVERRIDE".
 
         Returns:
             True  = 청산 성공
@@ -156,7 +167,7 @@ class TradingWorker:
             "AI 강제 청산 트리거: setting_id=%s symbol=%s profit_pct=%.2f%% reason=%s",
             self.setting_id, self.symbol, profit_pct, reason,
         )
-        await self._sell(current_price, profit_pct, reason)
+        await self._sell(current_price, profit_pct, reason, close_type=close_type, expected_price=None)
         return True
 
     @property
@@ -219,6 +230,9 @@ class TradingWorker:
         self.trade_style = setting.trade_style
         self.ai_score = int(setting.ai_score) if setting.ai_score is not None else None
         self.ai_reason = setting.ai_reason
+        # Admin 분석용 — 레거시 포지션(bought_at=None)은 None 그대로 유지
+        self.bought_at = setting.bought_at
+        self.ai_version = setting.ai_version or "v2.0"
 
         if setting.buy_price is not None and setting.amount_coin is not None:
             # ── 상태 복구 경로 ──────────────────────────────────────
@@ -389,16 +403,22 @@ class TradingWorker:
 
         should_sell = False
         reason = ""
+        close_type: str | None = None
+        expected_price: float | None = None
 
         if pos.target_price and current_price >= pos.target_price:
             should_sell = True
             reason = f"🎯 익절 ({profit_pct:+.2f}%)"
+            close_type = "TP_HIT"
+            expected_price = pos.target_price
         elif pos.stop_price and current_price <= pos.stop_price:
             should_sell = True
             reason = f"🛑 손절 ({profit_pct:+.2f}%)"
+            close_type = "SL_HIT"
+            expected_price = pos.stop_price
 
         if should_sell:
-            await self._sell(current_price, profit_pct, reason)
+            await self._sell(current_price, profit_pct, reason, close_type=close_type, expected_price=expected_price)
 
     async def _refresh_targets_from_db(self) -> None:
         """DB에서 target_profit_pct·stop_loss_pct 를 재조회해 인메모리를 최신화한다.
@@ -452,7 +472,14 @@ class TradingWorker:
     # 매도
     # ------------------------------------------------------------------
 
-    async def _sell(self, current_price: float, profit_pct: float, reason: str) -> None:
+    async def _sell(
+        self,
+        current_price: float,
+        profit_pct: float,
+        reason: str,
+        close_type: str | None = None,
+        expected_price: float | None = None,
+    ) -> None:
         """실제 잔고를 확인한 뒤 수량을 보정하여 시장가 매도를 실행한다.
 
         insufficient_funds_ask 방지를 위해 매도 직전 업비트 실제 free 잔고를 조회하고
@@ -461,6 +488,13 @@ class TradingWorker:
         1. 잔고 조회 실패(네트워크 오류): 이번 사이클 건너뛰고 다음 주기에 재시도.
         2. 잔고 × 현재가 < MIN_SELL_ORDER_KRW: 수동 매도 추정 → DB 정리 후 안전 종료.
         3. 정상 범위 잔고: min(actual, db) 수량으로 매도 (수수료·소수점 오차 자동 보정).
+
+        Args:
+            current_price:  현재 시장가 (KRW).
+            profit_pct:     현재 수익률 (%).
+            reason:         매도 사유 문자열 (DM·로그 표시용).
+            close_type:     TradeHistory 태그 — TP_HIT / SL_HIT / AI_FORCE_SELL / MANUAL_OVERRIDE.
+            expected_price: 익절·손절 목표 단가 (슬리피지 추적용). 강제/수동 청산 시 None.
         """
         pos = self._position
         if pos is None:
@@ -503,6 +537,10 @@ class TradingWorker:
                     trade_style=self.trade_style,
                     ai_score=self.ai_score,
                     ai_reason=self.ai_reason,
+                    bought_at=self.bought_at,
+                    close_type=close_type,
+                    ai_version=self.ai_version or "v2.0",
+                    expected_price=expected_price,
                 )
                 db.add(history)
                 await db.commit()
@@ -593,6 +631,10 @@ class TradingWorker:
                 trade_style=self.trade_style,
                 ai_score=self.ai_score,
                 ai_reason=self.ai_reason,
+                bought_at=self.bought_at,
+                close_type=close_type,
+                ai_version=self.ai_version or "v2.0",
+                expected_price=expected_price,
             )
             db.add(history)
             await db.commit()
