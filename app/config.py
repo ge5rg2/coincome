@@ -34,5 +34,9 @@ class Settings(BaseSettings):
     # OpenAI API 키 (백테스트 비교용 — 운영 AI는 Anthropic 사용)
     openai_api_key: str = ""
 
+    # Admin Dashboard API 키 (관리자 통계 엔드포인트 인증용)
+    # 운영 환경에서 반드시 강력한 난수 값으로 설정 — 기본값 사용 금지
+    admin_api_key: str = ""
+
 
 settings = Settings()

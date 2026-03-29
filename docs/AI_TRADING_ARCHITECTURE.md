@@ -35,7 +35,8 @@ Discord Bot (discord.py)
        │    ├─ 1시간 주기: Top10 KRW 코인 4h+1h+15m 지표 캐시
        │    └─ on-demand fetch: 보유 포지션 캐시 미스 시 즉시 fetch
        ├─ AITraderService (ai_trader.py)
-       │    ├─ analyze_market(engine_type, weight_pct) — 신규 픽
+       │    ├─ analyze_market(engine_type, weight_pct, regime) — 신규 픽
+       │    │   └─ regime="BEAR" 시 SCALPING/SWING 방어 지시사항 동적 주입
        │    └─ review_positions(engine_type) — 기존 포지션 HOLD/UPDATE/SELL
        ├─ WorkerRegistry + TradingWorker (trading_worker.py)
        │    └─ 0.5초 폴링 · 익절/손절 자동 실행 · Discord DM 알림
@@ -57,19 +58,26 @@ Discord Bot (discord.py)
   │       SELL → force_sell() | 실패 시 유저 DM 알림
   │       UPDATE → target/stop_loss DB 갱신
   │
+  ├─ [BTC Regime 판별] SWING 또는 SCALPING 엔진 실행 시
+  │       _fetch_btc_regime(): BTC/KRW 4h 캔들 60봉 → EMA50 계산
+  │       현재가 > EMA50 → BULL / 이하 → BEAR (실패 시 BULL 폴백)
+  │
   ├─ [Step 3-a] SWING 엔진 (is_swing_hour=True)
-  │       analyze_market("SWING") → score≥90 픽 → _buy_new_coins
+  │       analyze_market("SWING", regime=_btc_regime) → score≥90 픽 → _buy_new_coins
+  │       BEAR: 전략A(추세 돌파) 전면 금지, 전략B(RSI<25 낙폭반등)만 허용
   │
   ├─ [Step 3-b] SCALPING 엔진 (매 사이클)
-  │       analyze_market("SCALPING") → score≥90 픽 → _buy_new_coins
+  │       analyze_market("SCALPING", regime=_btc_regime) → score≥90 픽 → _buy_new_coins
+  │       BEAR: 매력도 85점 상한 강제 + TP 1.5% 이하 단기 목표
   │
   ├─ [Step 3-c] MAJOR 엔진 (is_swing_hour=True AND is_major_on)
   │       3중 기계적 필터 (EMA200·정배열·BB상단돌파)
-  │       통과 종목 → analyze_market("MAJOR_TREND")
+  │       통과 종목 → analyze_market("MAJOR_TREND") ← regime 미적용 (자체 필터로 방어)
   │       통과 없어도 DM에 관망 한 줄 표시
   │
   ├─ [Step 4] DM 리포트 전송
   │       엔진별 섹션 통합 임베드 (엔진 태그 정확 표시)
+  │       ManualSellView 미첨부 — 수동 청산은 /내포지션 전용 (2026-03-29)
   │
   └─ 에러 처리
           잔고 조회 실패 → 신규 매수 스킵 + 유저 DM
@@ -177,6 +185,21 @@ flowchart TD
 ```
 
 조건 3개 모두 통과 시에만 AI 분석 진행. 통과 없으면 "전체 관망" DM 표시.
+
+### 4-2. Admin 분석용 TradeHistory 태깅 (2026-03-28 추가)
+
+청산 시 TradeHistory에 아래 컬럼이 자동 저장된다. Admin 대시보드 성과 분석의 기반 데이터.
+
+| 컬럼 | 타입 | 값 | 설명 |
+|---|---|---|---|
+| `close_type` | String(50) | `TP_HIT` / `SL_HIT` / `AI_FORCE_SELL` / `MANUAL_OVERRIDE` | 청산 유형 태그 |
+| `bought_at` | DateTime(tz) | UTC datetime | 매수 체결 시각 (BotSetting에서 이관) |
+| `ai_version` | String(20) | `"v2.0"` | AI 전략 버전 (BotSetting에서 이관) |
+| `expected_price` | Float | 목표 단가 or None | 익절·손절 목표가 — 실제 체결가 비교로 슬리피지 추적 |
+
+BotSetting에도 `bought_at` / `ai_version` 컬럼이 추가되어 포지션 보유 중 임시 보관한다.
+`force_sell(reason, close_type)` — close_type 파라미터 추가 (기본값 `AI_FORCE_SELL`).
+ManualSellView의 force_sell 호출 시 `close_type="MANUAL_OVERRIDE"` 명시 전달.
 
 ## 5. 매매 전략 (고승률 스나이퍼)
 

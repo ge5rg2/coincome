@@ -486,6 +486,7 @@ class AITraderService:
         engine_type: str = "SWING",
         weight_pct: float = 20.0,
         available_krw: float = 0.0,
+        regime: str = "BULL",
     ) -> dict:
         """MarketDataManager 캐시 데이터를 기반으로 시장을 분석하고 최대 2개 코인을 픽한다.
 
@@ -497,6 +498,8 @@ class AITraderService:
             holding_symbols: 유저가 현재 감시 중인 코인 심볼 집합. AI 픽에서 자동 제외.
             engine_type:     "SWING" (4h 듀얼 전략) 또는 "SCALPING" (1h 모멘텀 단타).
             weight_pct:      이번 사이클에 적용할 진입 비중 (%). ai_manager가 엔진별로 주입.
+            regime:          BTC 4h EMA50 기반 시장 국면. "BULL" 또는 "BEAR".
+                             BEAR 시 알트 엔진 프롬프트에 방어 지시사항이 추가된다.
             available_krw:   이번 사이클 가용 예산 (KRW). AI 유저 프롬프트에 컨텍스트 제공.
 
         Returns:
@@ -526,6 +529,34 @@ class AITraderService:
             system_prompt = _CORE_SCALPING_PROMPT
         else:
             system_prompt = _CORE_SWING_PROMPT
+
+        # ── Dynamic Regime Filter: BEAR 시장 방어 지시사항 동적 주입 ──
+        # MAJOR 엔진은 자체 3중 필터로 이미 방어되므로 ALT 엔진에만 적용.
+        # regime 파라미터가 "BEAR"일 때만 시스템 프롬프트 말미에 추가 지시사항을 첨부한다.
+        if regime.upper() == "BEAR" and not is_major:
+            if is_scalping:
+                _bear_instruction = (
+                    "\n\n[DYNAMIC REGIME OVERRIDE — BEAR 시장 필수 적용]\n"
+                    "현재 비트코인이 약세장(BEAR)이므로 알트코인 휩쏘 위험이 매우 큽니다. "
+                    "개별 코인의 모멘텀이 압도적이지 않다면 절대 매력도 85점 이상을 주지 마세요. "
+                    "진입 시에도 익절 목표(TP)를 1.5% 이하로 아주 짧게 잡으세요."
+                )
+            else:  # SWING
+                _bear_instruction = (
+                    "\n\n[DYNAMIC REGIME OVERRIDE — BEAR 시장 필수 적용]\n"
+                    "현재 비트코인이 약세장(BEAR)이므로 전략 A(추세 돌파) 진입을 전면 금지합니다. "
+                    "오직 4h RSI가 25 미만인 전략 B(과대 낙폭 반등) 조건에 해당하는 종목만 "
+                    "매우 엄격하게 탐색하세요."
+                )
+            system_prompt = system_prompt + _bear_instruction
+            logger.info(
+                "AITraderService: BEAR regime 방어 지시사항 주입 (engine=%s)", _engine
+            )
+        else:
+            logger.info(
+                "AITraderService: regime=%s (engine=%s) — 프롬프트 추가 없음",
+                regime.upper(), _engine,
+            )
 
         # 호출자가 주입한 weight_pct 그대로 사용 (AI 응답 무시)
         forced_weight: float = float(weight_pct)

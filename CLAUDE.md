@@ -79,7 +79,7 @@
 <type>(<scope>): <subject>
 
 type : feat / fix / refactor / docs / chore / test
-scope: ai / engine / report / prompt / review / worker / bot / db / docs / market
+scope: ai / engine / report / prompt / review / worker / bot / db / docs / market / api
 ```
 
 ### V2 아키텍처 불변 원칙
@@ -89,6 +89,9 @@ scope: ai / engine / report / prompt / review / worker / bot / db / docs / marke
 4. **에러 DM 알림**: 크리티컬 오류(force_sell 실패, DB 삽입 실패, 잔고 조회 실패)는 반드시 유저 DM
 5. **View IDOR 방지**: BotSetting 조회 시 `BotSetting.user_id == user_id` AND 조건 필수. 단독 id 조회 금지
 6. **View 중복 청산 방지**: `is_finished()` 선제 체크 후 `self.stop()`을 `defer()` 이전에 호출
+7. **Dynamic Regime Filter**: SWING/SCALPING analyze_market 호출 전 `_fetch_btc_regime()`으로 BTC 4h EMA50 regime 계산 필수. MAJOR 엔진은 적용 제외.
+8. **정기 리포트 View 미첨부**: ai_manager _process_user Step 4 DM 전송 시 ManualSellView 부착 금지. 수동 청산은 /내포지션 전용.
+9. **Admin API 인증**: /api/admin/* 엔드포인트는 X-Admin-API-Key 헤더 인증 필수. settings.admin_api_key 기반.
 
 ### AI 트레이딩 변경 시 문서 갱신 대상
 - `PROJECT_STATE.md` — 변경 이력, DB 모델, 오픈 이슈
