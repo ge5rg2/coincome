@@ -452,6 +452,13 @@ class AIFundManagerTask(commands.Cog):
                 )
                 await self._send_dm_embed(user_id, _krw_err_embed)
 
+        # ── BTC 4h EMA50 기반 시장 국면 판별 (ALT 엔진 공용) ─────────
+        # SWING / SCALPING 엔진 중 하나라도 실행될 때 한 번만 계산한다.
+        # 실패 시 기본값 BULL 으로 폴백 — 기존 프롬프트 동작 유지.
+        _btc_regime = "BULL"
+        if run_swing or run_scalp:
+            _btc_regime = await self._fetch_btc_regime()
+
         # ── Step 3-a: SWING 엔진 분석·매수 ───────────────────────────
         if run_swing:
             swing_invested = sum(
@@ -475,6 +482,7 @@ class AIFundManagerTask(commands.Cog):
                 engine_type="SWING",
                 weight_pct=swing_weight,
                 available_krw=max(swing_real_available, swing_paper_available),
+                regime=_btc_regime,
             )
             if swing_analysis.get("market_summary"):
                 market_summaries.append(
@@ -557,6 +565,7 @@ class AIFundManagerTask(commands.Cog):
                 engine_type="SCALPING",
                 weight_pct=scalp_weight,
                 available_krw=max(scalp_real_available, scalp_paper_available),
+                regime=_btc_regime,
             )
             if scalp_analysis.get("market_summary"):
                 market_summaries.append(
@@ -745,30 +754,8 @@ class AIFundManagerTask(commands.Cog):
             is_swing_hour=is_swing_hour,
         )
 
-        # ── ManualSellView: 리포트 하단에 수동 청산 UI 부착 ──────────
-        # 실전 + 모의 전체 running 포지션 중 buy_price가 있는 것만 선택지로 구성한다.
-        # 지역 import: 순환 임포트(ai_manager → views → trading_worker → ...) 방지
-        from app.bot.views.manual_sell_view import ManualSellView  # noqa: PLC0415
-
-        _sell_positions: list[dict] = []
-        for _s in real_running + paper_running:
-            if _s.buy_price is not None:
-                _ws_price = ws_manager.get_price(_s.symbol)
-                _profit = (
-                    (float(_ws_price) - float(_s.buy_price)) / float(_s.buy_price) * 100
-                    if _ws_price else 0.0
-                )
-                _sell_positions.append({
-                    "setting_id": _s.id,
-                    "symbol": _s.symbol,
-                    "is_paper": _s.is_paper_trading,
-                    "profit_pct": _profit,
-                })
-        _sell_view = (
-            ManualSellView(bot=self.bot, user_id=user_id, positions=_sell_positions)
-            if _sell_positions else None
-        )
-        await self._send_dm_embed(user_id, embed, view=_sell_view)
+        # 수동 청산은 /내포지션 커맨드로 일원화 — 정기 리포트에는 View 미첨부
+        await self._send_dm_embed(user_id, embed)
 
     # ------------------------------------------------------------------
     # Step 1·2: 기존 포지션 리뷰 (실전·모의 공용)
@@ -1374,6 +1361,49 @@ class AIFundManagerTask(commands.Cog):
         except Exception as exc:
             logger.error("MAJOR 필터 오류 (%s): %s", symbol, exc)
             return None
+
+    # ------------------------------------------------------------------
+    # BTC 4h EMA50 기반 시장 국면(Regime) 판별
+    # ------------------------------------------------------------------
+
+    async def _fetch_btc_regime(self) -> str:
+        """BTC/KRW 4h 봉 EMA50을 계산해 시장 국면을 반환한다.
+
+        현재가 > EMA50  → "BULL"
+        현재가 <= EMA50 → "BEAR"
+
+        캔들 조회 실패 시 기본값 "BULL" 을 반환해 기존 프롬프트 동작을 유지한다.
+
+        Returns:
+            "BULL" 또는 "BEAR"
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            ohlcv: list = await loop.run_in_executor(
+                None,
+                lambda: self._public_exchange.fetch_ohlcv("BTC/KRW", "4h", limit=60),
+            )
+            if not ohlcv or len(ohlcv) < 51:
+                logger.warning(
+                    "BTC regime: OHLCV 데이터 부족 (%d봉) — 기본값 BULL 사용",
+                    len(ohlcv or []),
+                )
+                return "BULL"
+
+            closes = pd.Series([float(c[4]) for c in ohlcv])
+            ema50  = float(closes.ewm(span=50, adjust=False).mean().iloc[-1])
+            price  = float(closes.iloc[-1])
+            regime = "BULL" if price > ema50 else "BEAR"
+
+            logger.info(
+                "BTC regime 판별: price=%.0f ema50=%.0f → %s",
+                price, ema50, regime,
+            )
+            return regime
+
+        except Exception as exc:
+            logger.warning("BTC regime 계산 실패, 기본값 BULL 사용: %s", exc)
+            return "BULL"
 
     # ------------------------------------------------------------------
     # Step 6: 통합 리포트 Embed 빌드
