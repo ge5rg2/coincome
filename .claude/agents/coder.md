@@ -249,6 +249,53 @@ elif pos.stop_price and current_price <= pos.stop_price:
     expected_price = pos.stop_price
 ```
 
+### Admin API 인증 패턴 (2026-03-29 확립)
+
+```python
+# ✅ FastAPI APIKeyHeader 기반 Admin API 인증
+from fastapi.security.api_key import APIKeyHeader
+from fastapi import Security, HTTPException, Depends
+from app.config import settings
+
+_API_KEY_HEADER = APIKeyHeader(name="X-Admin-API-Key", auto_error=False)
+
+async def get_api_key(api_key: Annotated[str | None, Security(_API_KEY_HEADER)]) -> str:
+    if not settings.admin_api_key:
+        raise HTTPException(status_code=403, detail="Admin API key not configured.")
+    if not api_key or api_key != settings.admin_api_key:
+        raise HTTPException(status_code=403, detail="Invalid or missing Admin API key.")
+    return api_key
+
+# ✅ 엔드포인트에 적용
+@router.get("/stats/engines", dependencies=[Depends(get_api_key)])
+async def get_engine_stats(db: AsyncSession = Depends(get_db)) -> dict:
+    ...
+```
+
+### Dynamic Regime Filter 패턴 (2026-03-29 확립)
+
+```python
+# ✅ ai_manager.py: SWING/SCALPING 엔진 실행 전 BTC regime 한 번만 계산
+_btc_regime = "BULL"
+if run_swing or run_scalp:
+    _btc_regime = await self._fetch_btc_regime()
+
+# ✅ analyze_market 호출 시 regime 파라미터 전달
+swing_analysis = await self.ai_service.analyze_market(
+    market_data, holding_symbols,
+    engine_type="SWING",
+    weight_pct=swing_weight,
+    available_krw=...,
+    regime=_btc_regime,  # ← 필수
+)
+
+# ✅ ai_trader.py: regime 파라미터로 BEAR 방어 지시사항 동적 주입
+# MAJOR 엔진은 is_major=True이므로 자동 제외됨 (3중 필터로 자체 방어)
+if regime.upper() == "BEAR" and not is_major:
+    _bear_instruction = "..."
+    system_prompt = system_prompt + _bear_instruction
+```
+
 ### 마이그레이션 스크립트 패턴 (scripts/)
 
 ```python
