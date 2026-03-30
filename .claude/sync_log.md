@@ -5,6 +5,12 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 
 ---
 
+## 2026-03-30 — feat(api): Admin API P1+P2 — overview·trade-logs 신규, engines·close-types·slippage 고도화
+- 갱신 파일: coder.md, tester.md
+- 갱신 내용:
+  - coder.md에 Admin API 동적 필터 패턴 섹션 신설 (조건 목록 누적, COUNT 서브쿼리, 페이징, func.date() 그룹핑, 빈 날짜 채우기, func.extract("epoch"...) 보유시간, Numeric→float 변환)
+  - tester.md 4단계 회귀 체크에 Admin API 동적 필터 패턴 검증 항목 추가 (8개 체크포인트)
+
 ## 2026-03-29 — V2 Phase 4: Dynamic Regime Filter + Admin API + 리포트 UX
 - 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md
 - 갱신 내용:

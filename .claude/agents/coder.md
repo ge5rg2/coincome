@@ -296,6 +296,77 @@ if regime.upper() == "BEAR" and not is_major:
     system_prompt = system_prompt + _bear_instruction
 ```
 
+### Admin API 동적 필터 패턴 (2026-03-30 확립)
+
+```python
+# ✅ FastAPI Query 파라미터 + 동적 WHERE 조건 조합
+from fastapi import Query
+from typing import Optional
+from datetime import date, datetime, timezone
+
+@router.get("/trade-logs", dependencies=[Depends(get_api_key)])
+async def get_trade_logs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    user_id: Optional[str] = Query(default=None),
+    is_paper: Optional[bool] = Query(default=None),
+    engine: Optional[str] = Query(default=None),
+    from_date: Optional[date] = Query(default=None),
+    to_date: Optional[date] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    # ✅ 동적 조건 목록 누적 패턴
+    conditions = []
+    if user_id is not None:
+        conditions.append(TradeHistory.user_id == user_id)
+    if is_paper is not None:
+        conditions.append(TradeHistory.is_paper_trading.is_(is_paper))
+    if engine is not None:
+        conditions.append(TradeHistory.trade_style == engine)
+    if from_date is not None:
+        from_dt = datetime(from_date.year, from_date.month, from_date.day, tzinfo=timezone.utc)
+        conditions.append(TradeHistory.created_at >= from_dt)
+
+    # ✅ 조건이 있을 때만 .where(*conditions) 적용 (빈 리스트 전달 방지)
+    query = select(TradeHistory).order_by(TradeHistory.created_at.desc())
+    if conditions:
+        query = query.where(*conditions)
+
+    # ✅ COUNT 서브쿼리 (페이징 메타 산출)
+    count_query = select(func.count(TradeHistory.id))
+    if conditions:
+        count_query = count_query.where(*conditions)
+    total_count = int((await db.execute(count_query)).scalar() or 0)
+
+    # ✅ LIMIT/OFFSET 페이징
+    offset = (page - 1) * page_size
+    query = query.limit(page_size).offset(offset)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+
+# ✅ Numeric/Decimal → float() 명시적 변환 (buy_amount_krw 등 Numeric 컬럼)
+aum_krw = float(aum_result.scalar() or 0.0)
+
+# ✅ 날짜별 집계 — func.date() 그룹핑 + Python 레벨 빈 날짜 채우기
+daily_result = await db.execute(
+    select(
+        func.date(TradeHistory.created_at).label("trade_date"),
+        func.sum(TradeHistory.profit_krw).label("pnl_krw"),
+    )
+    .where(...)
+    .group_by(func.date(TradeHistory.created_at))
+)
+db_daily_map = {str(row.trade_date): float(row.pnl_krw or 0.0) for row in daily_result.all()}
+# 데이터 없는 날 0.0으로 채우기
+for offset in range(6, -1, -1):
+    date_str = (today_utc - timedelta(days=offset)).strftime("%Y-%m-%d")
+    daily_pnl.append({"date": date_str, "pnl_krw": db_daily_map.get(date_str, 0.0)})
+
+# ✅ 평균 보유시간 — EXTRACT(EPOCH ...) PostgreSQL 문법
+func.avg(
+    func.extract("epoch", TradeHistory.created_at - TradeHistory.bought_at) / 3600
+).label("avg_hold_hours")
+```
+
 ### 마이그레이션 스크립트 패턴 (scripts/)
 
 ```python
