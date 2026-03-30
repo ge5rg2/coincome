@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-29 (최종 수정: 2026-03-29 — Dynamic Regime Filter(BTC 4h EMA50) 도입, 정기 리포트 수동 청산 버튼 제거, Admin Dashboard API 신설)
+> **기준일**: 2026-03-30 (최종 수정: 2026-03-30 — Admin Dashboard API P1+P2 고도화 — overview·trade-logs 신규 엔드포인트, engines·close-types·slippage 필터·지표 확장)
 > **현재 작업 브랜치**: `dev`
 > **최신 안정 브랜치**: `main` (커밋 `d11a0fd`)
 
@@ -307,6 +307,7 @@ coincome/
 
 | 커밋        | 날짜       | 내용                                                                                                                                                                                                                                                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `034f598`   | 2026-03-30 | feat(api): Admin API P1+P2 — overview·trade-logs 신규, engines·close-types·slippage 고도화 — KPI·7일 pnl·페이징 필터·avg_profit/loss_pct·avg_hold_hours·is_paper/engine 동적 필터 |
 | `cae59b7`   | 2026-03-29 | feat(api): Admin 대시보드 연동 통계 API 라우터 신설 — /api/admin/stats/engines·close-types·slippage, X-Admin-API-Key 인증, ADMIN_API_KEY 환경변수 추가 |
 | `b7af77f`   | 2026-03-29 | feat(ai): BTC 4h EMA50 기반 Dynamic Regime Filter 도입 — _fetch_btc_regime() 메서드, BEAR 시 SCALPING(85점 상한·TP 1.5%↓) / SWING(전략A 금지·전략B only) 방어 지시사항 동적 주입 |
 | `e95b2dc`   | 2026-03-29 | feat(bot): 정기 리포트 수동 청산 버튼 제거 — ManualSellView 로직 ai_manager.py Step 4에서 완전 제거, /내포지션 일원화 |
@@ -358,7 +359,7 @@ coincome/
 
 | 우선순위 | 항목                                                                                                                                               | 관련 브랜치      |
 | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
-| 🔴 높음  | **`dev` → `main` PR 생성** — V2 Phase 4 (Dynamic Regime Filter + Admin API) 배포 (`cae59b7` 기준)                                                   | `dev` → `main`   |
+| 🔴 높음  | **`dev` → `main` PR 생성** — V2 Phase 4+P2 (Dynamic Regime Filter + Admin API P1+P2 고도화) 배포 (`034f598` 기준)                                    | `dev` → `main`   |
 | 🟡 보통  | **ADMIN_API_KEY 환경변수 운영 서버 설정** — .env에 강력한 난수 키 값 등록 필수                                                                       | `dev`            |
 | 🟡 보통  | **Regime Filter Forward Testing** — BEAR 판별 시 SCALPING·SWING 방어 프롬프트 실제 동작 검증                                                        | `dev`            |
 | 🔴 높음  | **Forward Testing 실시간 검증** — SWING/SCALPING/MAJOR 엔진 모의투자 가동 후 수익률·엔진 태그 정확도 확인                                          | `dev`            |
