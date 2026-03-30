@@ -456,12 +456,15 @@ async def get_close_type_stats(
     if is_paper is not None:
         conditions.append(TradeHistory.is_paper_trading.is_(is_paper))
 
+    # NOTE: func.coalesce()를 GROUP BY에 쓰면 PostgreSQL이 SELECT 절의 원본 컬럼과
+    #       다른 표현식으로 인식해 GroupingError를 발생시킨다.
+    #       → trade_style 컬럼으로 직접 그룹핑 후 Python 단에서 None → "UNKNOWN" 변환.
     query = (
         select(
-            func.coalesce(TradeHistory.close_type, "UNKNOWN").label("close_type"),
+            TradeHistory.close_type.label("close_type"),
             func.count(TradeHistory.id).label("count"),
         )
-        .group_by(func.coalesce(TradeHistory.close_type, "UNKNOWN"))
+        .group_by(TradeHistory.close_type)
         .order_by(func.count(TradeHistory.id).desc())
     )
     if conditions:
@@ -476,7 +479,7 @@ async def get_close_type_stats(
         cnt = int(row.count or 0)
         close_types.append(
             {
-                "close_type": row.close_type,
+                "close_type": row.close_type or "UNKNOWN",
                 "count": cnt,
                 "ratio_pct": round(cnt / total_count * 100, 1) if total_count > 0 else 0.0,
             }
