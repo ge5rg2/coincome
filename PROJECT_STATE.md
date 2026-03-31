@@ -311,6 +311,7 @@ coincome/
 
 | 커밋        | 날짜       | 내용                                                                                                                                                                                                                                                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `931c25a`   | 2026-03-31 | fix(report): AI 운용 총자산 AUM 오류 및 비활성 엔진 레이블 노출 수정 — /ai통계 real_total_asset을 업비트 전체 잔고 대신 AI 예산 합산(swing+scalp+major) 기준으로 표시, _build_unified_report_embed에 is_major_on 파라미터 추가해 MAJOR OFF 시 "2엔진" 레이블·MAJOR 대기 안내 미표시 |
 | `034f598`   | 2026-03-30 | feat(api): Admin API P1+P2 — overview·trade-logs 신규, engines·close-types·slippage 고도화 — KPI·7일 pnl·페이징 필터·avg_profit/loss_pct·avg_hold_hours·is_paper/engine 동적 필터 |
 | `cae59b7`   | 2026-03-29 | feat(api): Admin 대시보드 연동 통계 API 라우터 신설 — /api/admin/stats/engines·close-types·slippage, X-Admin-API-Key 인증, ADMIN_API_KEY 환경변수 추가 |
 | `b7af77f`   | 2026-03-29 | feat(ai): BTC 4h EMA50 기반 Dynamic Regime Filter 도입 — _fetch_btc_regime() 메서드, BEAR 시 SCALPING(85점 상한·TP 1.5%↓) / SWING(전략A 금지·전략B only) 방어 지시사항 동적 주입 |
