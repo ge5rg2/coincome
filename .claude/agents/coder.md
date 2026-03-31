@@ -212,6 +212,52 @@ user.is_major_enabled = True   # 절대 금지
 user.ai_mode_enabled = True    # 절대 금지
 ```
 
+### 등급별 AI 엔진 제한 패턴 (2026-03-30 확립)
+
+```python
+# ✅ /ai실전·/ai모의 커맨드 진입 시 FREE 차단
+max_engines = int(getattr(user, "max_active_engines", 1) if user else 0)
+if user is None or max_engines == 0:
+    await interaction.response.send_message(
+        embed=_make_free_blocked_embed(), ephemeral=True
+    )
+    return
+
+# ✅ 등급별 View 분기
+is_vip = user.subscription_tier == SubscriptionTier.VIP
+if is_vip:
+    view = VipEngineToggleView(user=user)   # 토글 복수 선택 + 다음 →
+else:
+    view = ProEngineSelectView(user=user)   # 알트 1개 택 1 버튼
+
+# ✅ 예산 범위 파라미터화 (_validate_budget_range)
+# 실전: _validate_budget_range(raw, 50_000, 10_000_000)
+# 모의: _validate_budget_range(raw, 500_000, 10_000_000)
+
+# ✅ VIP 동적 Modal 필드 수 결정
+# 1엔진 선택 → 3필드 (예산1 + 비중 + 최대종목)
+# 2엔진 선택 → 4필드 (예산2 + 비중 + 최대종목)
+# 3엔진 선택 → 5필드 (예산3 + 비중 + 최대종목, Discord 최대)
+
+# ✅ VIP 토글 View에서 다음 버튼 클릭 시 선택 없으면 에러 (stop 없이)
+if not self._selected:
+    await interaction.response.send_message(
+        "⚠️ 최소 1개 이상 엔진을 선택해 주세요.", ephemeral=True
+    )
+    return
+
+# ✅ PRO View에서 버튼 클릭 시 Modal 표시 (defer 없이 바로 send_modal)
+async def _on_swing(self, interaction: discord.Interaction) -> None:
+    modal = SwingSettingsModal(...)
+    await interaction.response.send_modal(modal)
+
+# ✅ VIP 토글 버튼 상태 갱신 (edit_message 사용)
+async def _toggle_swing(self, interaction: discord.Interaction) -> None:
+    self._selected.add("SWING") or self._selected.discard("SWING")
+    self._refresh_styles()
+    await interaction.response.edit_message(view=self)
+```
+
 ### Admin 분석용 TradeHistory 태깅 패턴 (2026-03-28 확립)
 
 ```python
