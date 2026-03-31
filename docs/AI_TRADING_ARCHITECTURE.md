@@ -14,7 +14,7 @@
 | **AI 호출** | 매 폴링 사이클 (0.5초) | 매 폴링 사이클 (0.5초) | 사용자 정의 Step 간격 (기본 24h) |
 | **지표 수집** | 실시간 API (`fetch_ticker`) + MarketDataManager 1h 주기 캐시 | 동일 | 사전 수집 OHLCV 슬라이싱 |
 | **결과 저장** | DB (`trades`, `bot_settings`) | DB (`paper_trades`) | CSV (`.result/backtest_results_*.csv`) |
-| **구독 필요** | VIP | FREE 이상 | 불필요 (스크립트 직접 실행) |
+| **구독 필요** | PRO/VIP (max_active_engines≥1) | PRO/VIP (max_active_engines≥1) | 불필요 (스크립트 직접 실행) |
 | **지원 AI 모델** | Claude (Anthropic) | Claude (Anthropic) | OpenAI / Anthropic / Gemini |
 | **진입 파일** | `app/services/trading_worker.py` | `app/services/trading_worker.py` | `scripts/backtester.py` |
 
@@ -27,9 +27,13 @@
 ```
 Discord Bot (discord.py)
   ├─ /ai실전 커맨드 (bot/cogs/ai_trading.py)
-  │    └─ 엔진 선택: SWING / SCALPING / MAJOR / ALL
+  │    ├─ FREE: 차단 (max_active_engines==0)
+  │    ├─ PRO: ProEngineSelectView — SWING/SCALPING 버튼 1개 택 1
+  │    └─ VIP: VipEngineToggleView — 복수 토글 선택 → VipDynamicModal (3~5필드)
   ├─ /ai모의 커맨드 (bot/cogs/paper_trading.py)
-  │    └─ 엔진 선택: SWING / SCALPING / MAJOR / ALL (ai_engine_mode)
+  │    ├─ FREE: 차단 (max_active_engines==0)
+  │    ├─ PRO: ProPaperEngineSelectView — SWING/SCALPING 버튼 1개 택 1
+  │    └─ VIP: VipPaperEngineToggleView — 복수 토글 선택 → VipPaperDynamicModal (3~5필드)
   └─ AIManagerTask (bot/tasks/ai_manager.py) — 매시 정각 스케줄
        ├─ MarketDataManager (market_data.py)
        │    ├─ 1시간 주기: Top10 KRW 코인 4h+1h+15m 지표 캐시
