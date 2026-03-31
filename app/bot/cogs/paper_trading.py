@@ -1552,7 +1552,7 @@ class PaperTradingCog(commands.Cog):
             if real_total_invested > 0 else 0.0
         )
 
-        # 실전 총자산 = 업비트 KRW 잔고 + 보유 코인 현재 평가금액
+        # 실전 KRW 잔고 조회 (엔진별 예산 가용 계산용)
         actual_krw = 0.0
         if is_real_active and user.upbit_access_key and user.upbit_secret_key:
             try:
@@ -1565,6 +1565,23 @@ class PaperTradingCog(commands.Cog):
                 logger.warning(
                     "실전 KRW 잔고 조회 실패: user_id=%s err=%s", user_id, exc
                 )
+
+        # AI 운용 총자산 = AI 예산 합산 + 보유 코인 현재 평가금액
+        # (업비트 전체 잔고 대신 유저가 AI에 할당한 예산 기준으로 표시)
+        _real_engine = (getattr(user, "ai_engine_mode", "SWING") or "SWING").upper()
+        if _real_engine == "BOTH":
+            _real_engine = "ALL"
+        real_ai_budget = 0.0
+        if _real_engine in ("SWING", "ALL"):
+            real_ai_budget += float(getattr(user, "ai_swing_budget_krw", 0) or 0)
+        if _real_engine in ("SCALPING", "ALL"):
+            real_ai_budget += float(getattr(user, "ai_scalp_budget_krw", 0) or 0)
+        is_major_on_real = bool(getattr(user, "is_major_enabled", False))
+        if is_major_on_real:
+            real_ai_budget += float(getattr(user, "major_budget", 0) or 0)
+        # 예산 미설정(0) 폴백: 업비트 실제 잔고 사용 (기존 동작 유지)
+        if real_ai_budget <= 0:
+            real_ai_budget = actual_krw
 
         real_coin_value = 0.0
         real_open_lines: list[str] = []
@@ -1585,7 +1602,7 @@ class PaperTradingCog(commands.Cog):
             else:
                 real_open_lines.append(f"❓ **{s.symbol}** | 시세 수신 대기 중...")
 
-        real_total_asset = actual_krw + real_coin_value
+        real_total_asset = real_ai_budget + real_coin_value
         real_coin_pct = (
             real_coin_value / real_total_asset * 100
         ) if real_total_asset > 0 else 0.0
@@ -1674,7 +1691,7 @@ class PaperTradingCog(commands.Cog):
                     f"📊 포트폴리오 비중\n"
                     f"[{bar}] 코인 {real_coin_pct:.0f}% | 현금 {100 - real_coin_pct:.0f}%\n"
                     f"💰 AI 운용 총자산: **{real_total_asset:,.0f} KRW**\n"
-                    f"  현금: {actual_krw:,.0f} KRW | 코인 평가액: {real_coin_value:,.0f} KRW"
+                    f"  AI 예산: {real_ai_budget:,.0f} KRW | 코인 평가액: {real_coin_value:,.0f} KRW"
                 ),
                 inline=False,
             )

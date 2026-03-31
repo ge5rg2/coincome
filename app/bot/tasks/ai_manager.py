@@ -363,6 +363,13 @@ class AIFundManagerTask(commands.Cog):
         # ── 연착륙 분기: 종료 모드 시 신규 매수 없이 리뷰만 완료 ──────
         is_shutting_down: bool = bool(getattr(user, "ai_is_shutting_down", False))
         if is_shutting_down:
+            # 연착륙 시점에서는 is_major_on 변수가 아직 미정의 — 직접 계산
+            _shutting_major_on_real = bool(getattr(user, "is_major_enabled", False))
+            _shutting_major_on_paper = (
+                is_paper_active
+                and engine_mode in ("MAJOR", "ALL")
+                and float(getattr(user, "major_budget", 0) or 0) > 0
+            )
             embed = self._build_unified_report_embed(
                 market_summary=(
                     "🟡 **연착륙 진행 중** — 신규 매수를 중단했습니다.\n"
@@ -379,6 +386,7 @@ class AIFundManagerTask(commands.Cog):
                 real_position_count=len(real_running),
                 paper_position_count=len(paper_running),
                 is_swing_hour=is_swing_hour,
+                is_major_on=_shutting_major_on_real or _shutting_major_on_paper,
             )
             await self._send_dm_embed(user_id, embed)
 
@@ -752,6 +760,7 @@ class AIFundManagerTask(commands.Cog):
             real_position_count=len(real_running) + len(real_bought),
             paper_position_count=len(paper_running) + len(paper_bought),
             is_swing_hour=is_swing_hour,
+            is_major_on=is_major_on,
         )
 
         # 수동 청산은 /내포지션 커맨드로 일원화 — 정기 리포트에는 View 미첨부
@@ -1423,6 +1432,7 @@ class AIFundManagerTask(commands.Cog):
         real_position_count: int = 0,
         paper_position_count: int = 0,
         is_swing_hour: bool = True,
+        is_major_on: bool = False,
     ) -> discord.Embed:
         """실전·모의투자 결과를 하나의 Embed로 통합한다.
 
@@ -1445,6 +1455,9 @@ class AIFundManagerTask(commands.Cog):
             paper_position_count:  이번 사이클 후 모의 보유 종목 수 (기존 + 신규).
             is_swing_hour:         현재 KST 시각이 4h 봉 마감 시각인지 여부
                                    (ALL 모드 스윙·메이저 엔진 대기 안내에 사용).
+            is_major_on:           MAJOR 엔진이 실제 활성화된 상태인지 여부
+                                   (is_major_on_real OR is_major_on_paper).
+                                   False이면 "3엔진" 레이블 및 MAJOR 대기 안내를 표시하지 않음.
 
         Returns:
             단일 discord.Embed 객체.
@@ -1461,9 +1474,15 @@ class AIFundManagerTask(commands.Cog):
             style_label = "⚡ 알트 스캘핑 (1h 봉)"
         elif engine_mode == "ALL":
             if swing_is_idle:
-                style_label = "🔥 3엔진 동시 가동 (알트 스캘핑 가동 중 / 스윙·메이저 대기)"
+                if is_major_on:
+                    style_label = "🔥 3엔진 동시 가동 (알트 스캘핑 가동 중 / 스윙·메이저 대기)"
+                else:
+                    style_label = "🔥 2엔진 동시 가동 (알트 스캘핑 가동 중 / 알트 스윙 대기)"
             else:
-                style_label = "🔥 3엔진 동시 가동 (알트 스윙+알트 스캘핑+메이저 트렌드)"
+                if is_major_on:
+                    style_label = "🔥 3엔진 동시 가동 (알트 스윙+알트 스캘핑+메이저 트렌드)"
+                else:
+                    style_label = "🔥 2엔진 동시 가동 (알트 스윙+알트 스캘핑)"
         elif engine_mode == "MAJOR":
             style_label = "🏦 메이저 트렌드 (4h EMA200 필터)"
         else:
@@ -1481,12 +1500,15 @@ class AIFundManagerTask(commands.Cog):
             desc = " + ".join(parts) + " 처리"
         elif swing_is_idle:
             # ALL 모드 비스윙 시각 전용 관망 문구
+            _idle_engine_desc = (
+                "스윙·메이저는 대기 중" if is_major_on else "알트 스윙은 대기 중"
+            )
             if is_real_active and is_paper_active:
-                desc = "실전·모의투자 관망 중 (알트 스캘핑 진입 조건 미달, 스윙·메이저는 대기 중)"
+                desc = f"실전·모의투자 관망 중 (알트 스캘핑 진입 조건 미달, {_idle_engine_desc})"
             elif is_real_active:
-                desc = "실전 관망 중 (알트 스캘핑 진입 조건 미달, 스윙·메이저는 대기 중)"
+                desc = f"실전 관망 중 (알트 스캘핑 진입 조건 미달, {_idle_engine_desc})"
             else:
-                desc = "모의투자 관망 중 (알트 스캘핑 진입 조건 미달, 스윙·메이저는 대기 중)"
+                desc = f"모의투자 관망 중 (알트 스캘핑 진입 조건 미달, {_idle_engine_desc})"
         elif is_real_active and is_paper_active:
             desc = "실전·모의투자 전액 현금 관망 중 (돌파/역추세 타점 부재)"
         elif is_real_active:
@@ -1500,12 +1522,15 @@ class AIFundManagerTask(commands.Cog):
         # Description 에 직접 넣어 4096자 한계 활용 (add_field 는 1024자 제한)
         _summary_display = market_summary or "분석 결과를 가져오지 못했습니다."
         if swing_is_idle:
-            _idle_notices = (
-                "💤 **알트 스윙 엔진**: 현재 캔들 형성 대기 중 "
-                "(다음 4h 분석 시각에 가동)\n"
-                "💤 **메이저 트렌드 엔진**: 스윙과 동일한 4h 주기 — "
-                "대기 중 (다음 4h 분석 시각에 가동)"
-            )
+            _idle_parts = [
+                "💤 **알트 스윙 엔진**: 현재 캔들 형성 대기 중 (다음 4h 분석 시각에 가동)"
+            ]
+            if is_major_on:
+                _idle_parts.append(
+                    "💤 **메이저 트렌드 엔진**: 스윙과 동일한 4h 주기 — "
+                    "대기 중 (다음 4h 분석 시각에 가동)"
+                )
+            _idle_notices = "\n".join(_idle_parts)
             _summary_display = (
                 _summary_display + "\n\n" + _idle_notices
                 if market_summary
