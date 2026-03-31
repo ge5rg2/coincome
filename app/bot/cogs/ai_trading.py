@@ -1400,7 +1400,8 @@ class AITradingCog(commands.Cog):
             user = result.scalar_one_or_none()
 
         # ── FREE 차단 ────────────────────────────────────────────────
-        max_engines = int(getattr(user, "max_active_engines", 1) if user else 0)
+        # getattr default를 0으로 설정 — 컬럼 미존재 시 안전하게 차단
+        max_engines = int(getattr(user, "max_active_engines", 0) if user else 0)
         if user is None or max_engines == 0:
             await interaction.response.send_message(
                 embed=_make_free_blocked_embed(), ephemeral=True

@@ -1238,14 +1238,16 @@ class PaperTradingCog(commands.Cog):
             result = await db.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
             if user is None:
-                # 첫 방문 유저 자동 생성 (가상 잔고 1,000만 KRW 기본값 포함)
-                user = User(user_id=user_id)
+                # 첫 방문 유저 자동 생성 — max_active_engines=0(FREE) 명시적 설정
+                # model default=1이 적용되면 신규 유저가 PRO로 취급되는 버그 방지
+                user = User(user_id=user_id, max_active_engines=0)
                 db.add(user)
                 await db.commit()
                 await db.refresh(user)
 
         # ── FREE 차단 ────────────────────────────────────────────────
-        max_engines = int(getattr(user, "max_active_engines", 1) or 1)
+        # NOTE: `or 1` 제거 필수 — 0(FREE)이 falsy라 or 1이 붙으면 FREE 차단이 무력화됨
+        max_engines = int(getattr(user, "max_active_engines", 0))
         if max_engines == 0:
             await interaction.response.send_message(
                 embed=_make_paper_blocked_embed(), ephemeral=True
