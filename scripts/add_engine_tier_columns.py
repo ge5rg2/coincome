@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _USERS_COLUMNS: list[dict] = [
     {
         "column": "max_active_engines",
-        "ddl": "ALTER TABLE users ADD COLUMN max_active_engines INTEGER DEFAULT 1",
+        "ddl": "ALTER TABLE users ADD COLUMN max_active_engines INTEGER DEFAULT 0",
     },
 ]
 

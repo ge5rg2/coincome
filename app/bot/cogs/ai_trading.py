@@ -151,8 +151,19 @@ class ProEngineSelectView(discord.ui.View):
         self.add_item(self._scalp_btn)
         self.add_item(self._off_btn)
 
+    async def _check_owner(self, interaction: discord.Interaction) -> bool:
+        """요청자가 View 소유자인지 검증한다. 타인 클릭 시 에러 반환."""
+        if str(interaction.user.id) != str(self._user.user_id):
+            await interaction.response.send_message(
+                "❌ 본인의 설정 패널만 조작할 수 있습니다.", ephemeral=True
+            )
+            return False
+        return True
+
     async def _on_swing(self, interaction: discord.Interaction) -> None:
         """알트 스윙 버튼 클릭 — SwingSettingsModal 표시."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         modal = SwingSettingsModal(
             user_id=user.user_id,
@@ -165,6 +176,8 @@ class ProEngineSelectView(discord.ui.View):
 
     async def _on_scalp(self, interaction: discord.Interaction) -> None:
         """알트 스캘핑 버튼 클릭 — ScalpSettingsModal 표시."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         modal = ScalpSettingsModal(
             user_id=user.user_id,
@@ -177,6 +190,8 @@ class ProEngineSelectView(discord.ui.View):
 
     async def _on_off(self, interaction: discord.Interaction) -> None:
         """OFF 버튼 클릭 — 즉시 전체 비활성화."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == user.user_id))
@@ -282,8 +297,19 @@ class VipEngineToggleView(discord.ui.View):
             discord.ButtonStyle.primary if "MAJOR" in self._selected else discord.ButtonStyle.secondary
         )
 
+    async def _check_owner(self, interaction: discord.Interaction) -> bool:
+        """요청자가 View 소유자인지 검증한다. 타인 클릭 시 에러 반환."""
+        if str(interaction.user.id) != str(self._user.user_id):
+            await interaction.response.send_message(
+                "❌ 본인의 설정 패널만 조작할 수 있습니다.", ephemeral=True
+            )
+            return False
+        return True
+
     async def _toggle_swing(self, interaction: discord.Interaction) -> None:
         """알트 스윙 토글."""
+        if not await self._check_owner(interaction):
+            return
         if "SWING" in self._selected:
             self._selected.discard("SWING")
         else:
@@ -293,6 +319,8 @@ class VipEngineToggleView(discord.ui.View):
 
     async def _toggle_scalp(self, interaction: discord.Interaction) -> None:
         """알트 스캘핑 토글."""
+        if not await self._check_owner(interaction):
+            return
         if "SCALPING" in self._selected:
             self._selected.discard("SCALPING")
         else:
@@ -302,6 +330,8 @@ class VipEngineToggleView(discord.ui.View):
 
     async def _toggle_major(self, interaction: discord.Interaction) -> None:
         """메이저 트렌드 토글."""
+        if not await self._check_owner(interaction):
+            return
         if "MAJOR" in self._selected:
             self._selected.discard("MAJOR")
         else:
@@ -311,6 +341,8 @@ class VipEngineToggleView(discord.ui.View):
 
     async def _on_off(self, interaction: discord.Interaction) -> None:
         """OFF 버튼 — 즉시 전체 비활성화."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == user.user_id))
@@ -330,6 +362,8 @@ class VipEngineToggleView(discord.ui.View):
 
     async def _on_next(self, interaction: discord.Interaction) -> None:
         """다음 버튼 — 선택 엔진 수에 따라 VipDynamicModal 표시."""
+        if not await self._check_owner(interaction):
+            return
         if not self._selected:
             await interaction.response.send_message(
                 "⚠️ 최소 1개 이상 엔진을 선택해 주세요.", ephemeral=True
@@ -1252,7 +1286,12 @@ class AIShutdownView(discord.ui.View):
         self._user_id = user_id
 
     async def _disable_all(self, interaction: discord.Interaction) -> None:
-        """버튼 전체를 비활성화하고 원본 메시지를 업데이트한다 (이중 클릭 방지)."""
+        """버튼 전체를 비활성화하고 원본 메시지를 업데이트한다 (이중 클릭 방지).
+
+        self.stop()을 호출하여 View를 즉시 종료 — edit_original_response 실패 시에도
+        discord.py 내부 콜백이 더 이상 처리되지 않도록 보장한다.
+        """
+        self.stop()  # View 즉시 종료 (이후 콜백 차단)
         for child in self.children:
             child.disabled = True
         try:
@@ -1435,7 +1474,7 @@ class AITradingCog(commands.Cog):
                 return f"🟢 ON | 예산: **{budget:,} KRW** (진입 비중 **{ratio}%**)"
             return "⏸️ OFF | 미설정 (가동 중지)"
 
-        is_vip = user.subscription_tier == SubscriptionTier.VIP
+        is_vip = user.is_vip  # 만료 체크 포함 프로퍼티 사용
 
         if is_vip:
             title = "🤖 AI 실전 자동 매매 설정 대시보드 (VIP)"

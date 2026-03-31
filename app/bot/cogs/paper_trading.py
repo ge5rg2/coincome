@@ -158,8 +158,19 @@ class ProPaperEngineSelectView(discord.ui.View):
         self.add_item(self._scalp_btn)
         self.add_item(self._off_btn)
 
+    async def _check_owner(self, interaction: discord.Interaction) -> bool:
+        """요청자가 View 소유자인지 검증한다. 타인 클릭 시 에러 반환."""
+        if str(interaction.user.id) != str(self._user.user_id):
+            await interaction.response.send_message(
+                "❌ 본인의 설정 패널만 조작할 수 있습니다.", ephemeral=True
+            )
+            return False
+        return True
+
     async def _on_swing(self, interaction: discord.Interaction) -> None:
         """알트 스윙 버튼 클릭 — PaperSwingSettingsModal 표시."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         modal = PaperSwingSettingsModal(
             user_id=user.user_id,
@@ -172,6 +183,8 @@ class ProPaperEngineSelectView(discord.ui.View):
 
     async def _on_scalp(self, interaction: discord.Interaction) -> None:
         """알트 스캘핑 버튼 클릭 — PaperScalpSettingsModal 표시."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         modal = PaperScalpSettingsModal(
             user_id=user.user_id,
@@ -184,6 +197,8 @@ class ProPaperEngineSelectView(discord.ui.View):
 
     async def _on_off(self, interaction: discord.Interaction) -> None:
         """OFF 버튼 클릭 — 즉시 모의투자 비활성화."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == user.user_id))
@@ -281,7 +296,18 @@ class VipPaperEngineToggleView(discord.ui.View):
             discord.ButtonStyle.primary if "MAJOR" in self._selected else discord.ButtonStyle.secondary
         )
 
+    async def _check_owner(self, interaction: discord.Interaction) -> bool:
+        """요청자가 View 소유자인지 검증한다. 타인 클릭 시 에러 반환."""
+        if str(interaction.user.id) != str(self._user.user_id):
+            await interaction.response.send_message(
+                "❌ 본인의 설정 패널만 조작할 수 있습니다.", ephemeral=True
+            )
+            return False
+        return True
+
     async def _toggle_swing(self, interaction: discord.Interaction) -> None:
+        if not await self._check_owner(interaction):
+            return
         if "SWING" in self._selected:
             self._selected.discard("SWING")
         else:
@@ -290,6 +316,8 @@ class VipPaperEngineToggleView(discord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def _toggle_scalp(self, interaction: discord.Interaction) -> None:
+        if not await self._check_owner(interaction):
+            return
         if "SCALPING" in self._selected:
             self._selected.discard("SCALPING")
         else:
@@ -298,6 +326,8 @@ class VipPaperEngineToggleView(discord.ui.View):
         await interaction.response.edit_message(view=self)
 
     async def _toggle_major(self, interaction: discord.Interaction) -> None:
+        if not await self._check_owner(interaction):
+            return
         if "MAJOR" in self._selected:
             self._selected.discard("MAJOR")
         else:
@@ -307,6 +337,8 @@ class VipPaperEngineToggleView(discord.ui.View):
 
     async def _on_off(self, interaction: discord.Interaction) -> None:
         """OFF 버튼 — 즉시 모의투자 비활성화."""
+        if not await self._check_owner(interaction):
+            return
         user = self._user
         async with AsyncSessionLocal() as db:
             result = await db.execute(select(User).where(User.user_id == user.user_id))
@@ -319,6 +351,8 @@ class VipPaperEngineToggleView(discord.ui.View):
 
     async def _on_next(self, interaction: discord.Interaction) -> None:
         """다음 버튼 — 선택 엔진 수에 따라 VipPaperDynamicModal 표시."""
+        if not await self._check_owner(interaction):
+            return
         if not self._selected:
             await interaction.response.send_message(
                 "⚠️ 최소 1개 이상 엔진을 선택해 주세요.", ephemeral=True
@@ -1281,7 +1315,7 @@ class PaperTradingCog(commands.Cog):
                 return f"🟢 ON | 가상 예산: **{budget:,} KRW** (진입 비중 **{ratio}%**)"
             return "⏸️ OFF | 미설정 (가동 중지)"
 
-        is_vip = user.subscription_tier == SubscriptionTier.VIP
+        is_vip = user.is_vip  # 만료 체크 포함 프로퍼티 사용
 
         if is_vip:
             title = "🎮 AI 모의투자 설정 대시보드 (VIP)"
@@ -1454,7 +1488,7 @@ class PaperTradingCog(commands.Cog):
                 return
 
             is_real_active = (
-                user.subscription_tier == SubscriptionTier.VIP
+                user.is_vip  # 만료 체크 포함 프로퍼티 사용
                 and user.ai_mode_enabled
             )
             is_paper_active = bool(user.ai_paper_mode_enabled)
