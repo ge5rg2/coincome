@@ -5,6 +5,21 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 
 ---
 
+## 2026-03-30 — feat(bot): PRO/VIP 등급별 AI 트레이딩 UI 및 엔진 차등화 개편
+- 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md
+- 갱신 내용:
+  - pm.md V2 원칙에 "등급별 AI 엔진 제한" 원칙 추가 (max_active_engines 기반)
+  - pm.md 핵심 파일 지도에 add_engine_tier_columns.py 추가
+  - coder.md "등급별 AI 엔진 제한 패턴" 섹션 신설 (FREE 차단·PRO/VIP 분기·토글 View·동적 Modal·_validate_budget_range 패턴)
+  - tester.md 4단계 회귀 체크에 "등급별 AI 엔진 제한 패턴" 검증 항목 추가 (PRO/VIP 분기, 예산 범위, is_major_enabled 불변)
+  - CLAUDE.md V2 불변 원칙 10번 추가 (등급별 AI 엔진 제한)
+
+## 2026-03-30 — feat(api): Admin API P1+P2 — overview·trade-logs 신규, engines·close-types·slippage 고도화
+- 갱신 파일: coder.md, tester.md
+- 갱신 내용:
+  - coder.md에 Admin API 동적 필터 패턴 섹션 신설 (조건 목록 누적, COUNT 서브쿼리, 페이징, func.date() 그룹핑, 빈 날짜 채우기, func.extract("epoch"...) 보유시간, Numeric→float 변환)
+  - tester.md 4단계 회귀 체크에 Admin API 동적 필터 패턴 검증 항목 추가 (8개 체크포인트)
+
 ## 2026-03-29 — V2 Phase 4: Dynamic Regime Filter + Admin API + 리포트 UX
 - 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md
 - 갱신 내용:

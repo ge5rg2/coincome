@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from sqlalchemy import Boolean, DateTime, Float, Integer, String
@@ -97,6 +97,13 @@ class User(Base):
     #                      기존 포지션이 모두 청산되면 ai_mode_enabled=False 로 자동 전환.
     ai_is_shutting_down: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # ── 등급별 활성 가능 AI 엔진 수 ──────────────────────────────────
+    # max_active_engines: 동시에 활성화할 수 있는 AI 엔진 개수
+    #   FREE  = 0 (AI 트레이딩 불가)
+    #   PRO   = 1 (알트 스윙 or 알트 스캘핑 중 1개)
+    #   VIP   = 3 (알트 스윙 + 알트 스캘핑 + 메이저 트렌드 모두 가능)
+    max_active_engines: Mapped[int] = mapped_column(Integer, default=0)
+
     # ── AI V2: 모듈형 엔진 선택 + 엔진별 독립 예산·비중 ─────────────────
     # ai_engine_mode     : 알트코인 엔진 선택
     #   "SWING"   — 📊 4h 듀얼 스윙 전용 (01·05·09·13·17·21시 KST 실행)
@@ -132,6 +139,13 @@ class User(Base):
     def is_pro(self) -> bool:
         if self.subscription_tier in (SubscriptionTier.PRO, SubscriptionTier.VIP):
             return self.sub_expires_at is None or self.sub_expires_at > datetime.utcnow()
+        return False
+
+    @property
+    def is_vip(self) -> bool:
+        """VIP 등급이며 구독이 만료되지 않았는지 확인한다."""
+        if self.subscription_tier == SubscriptionTier.VIP:
+            return self.sub_expires_at is None or self.sub_expires_at > datetime.now(timezone.utc)
         return False
 
     @property

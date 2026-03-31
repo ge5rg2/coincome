@@ -28,7 +28,8 @@ async def extend_subscription(
     user = result.scalar_one_or_none()
 
     if user is None:
-        user = User(user_id=user_id)
+        # max_active_engines=0 명시: 결제 완료 후 아래에서 tier에 맞게 갱신됨
+        user = User(user_id=user_id, max_active_engines=0)
         db.add(user)
 
     now = datetime.now(tz=timezone.utc)

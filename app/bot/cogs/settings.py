@@ -202,7 +202,8 @@ class TradingSettingModal(discord.ui.Modal, title="매매 설정"):
             result = await db.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
             if user is None:
-                user = User(user_id=user_id)
+                # max_active_engines=0 명시: model default=0이지만 명시적으로 FREE 보장
+                user = User(user_id=user_id, max_active_engines=0)
                 db.add(user)
                 await db.flush()
 
@@ -541,7 +542,8 @@ class SettingsCog(commands.Cog):
             result = await db.execute(select(User).where(User.user_id == user_id))
             user = result.scalar_one_or_none()
             if user is None:
-                user = User(user_id=user_id)
+                # max_active_engines=0 명시: FREE 신규 유저는 AI 접근 불가
+                user = User(user_id=user_id, max_active_engines=0)
                 db.add(user)
             user.upbit_access_key = access_key
             user.upbit_secret_key = secret_key

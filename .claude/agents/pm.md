@@ -57,7 +57,8 @@ app/
     ├── format.py                ← format_krw_price()
     └── time.py                  ← KST 유틸
 scripts/
-│   └── add_admin_analytics_columns.py ← Admin 분석 컬럼 idempotent 마이그레이션
+│   ├── add_admin_analytics_columns.py ← Admin 분석 컬럼 idempotent 마이그레이션
+│   └── add_engine_tier_columns.py    ← 등급별 max_active_engines 컬럼 idempotent 마이그레이션
 docs/AI_TRADING_ARCHITECTURE.md  ← 아키텍처 문서
 PROJECT_STATE.md                 ← 프로젝트 현황 문서
 ```
@@ -77,6 +78,7 @@ PROJECT_STATE.md                 ← 프로젝트 현황 문서
 - **Dynamic Regime Filter**: SWING/SCALPING 엔진 호출 전 _fetch_btc_regime()으로 BTC 4h EMA50 기반 시장 국면(BULL/BEAR) 판별. regime 파라미터를 analyze_market()에 전달 필수. MAJOR 엔진은 적용 제외 (3중 필터로 자체 방어).
 - **정기 리포트 View 미첨부**: ai_manager.py _process_user Step 4 DM 전송 시 ManualSellView 절대 부착 금지. 수동 청산은 /내포지션 커맨드 전용.
 - **Admin API 인증**: /api/admin/* 엔드포인트는 반드시 X-Admin-API-Key 헤더 인증 필수. settings.admin_api_key 미설정 시 모든 요청 거부.
+- **등급별 AI 엔진 제한**: `User.max_active_engines` 컬럼 기반 차단 (FREE=0, PRO=1, VIP=3). `/ai실전`·`/ai모의` 진입 시 `max_active_engines==0` 이면 즉시 차단. PRO는 알트 엔진 1개(SWING/SCALPING) 버튼 View, VIP는 토글 복수 선택 View + 동적 Modal(3~5필드) 구조.
 
 ### 커밋 컨벤션 (Conventional Commits)
 ```

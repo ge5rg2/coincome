@@ -212,6 +212,52 @@ user.is_major_enabled = True   # 절대 금지
 user.ai_mode_enabled = True    # 절대 금지
 ```
 
+### 등급별 AI 엔진 제한 패턴 (2026-03-30 확립)
+
+```python
+# ✅ /ai실전·/ai모의 커맨드 진입 시 FREE 차단
+max_engines = int(getattr(user, "max_active_engines", 1) if user else 0)
+if user is None or max_engines == 0:
+    await interaction.response.send_message(
+        embed=_make_free_blocked_embed(), ephemeral=True
+    )
+    return
+
+# ✅ 등급별 View 분기
+is_vip = user.subscription_tier == SubscriptionTier.VIP
+if is_vip:
+    view = VipEngineToggleView(user=user)   # 토글 복수 선택 + 다음 →
+else:
+    view = ProEngineSelectView(user=user)   # 알트 1개 택 1 버튼
+
+# ✅ 예산 범위 파라미터화 (_validate_budget_range)
+# 실전: _validate_budget_range(raw, 50_000, 10_000_000)
+# 모의: _validate_budget_range(raw, 500_000, 10_000_000)
+
+# ✅ VIP 동적 Modal 필드 수 결정
+# 1엔진 선택 → 3필드 (예산1 + 비중 + 최대종목)
+# 2엔진 선택 → 4필드 (예산2 + 비중 + 최대종목)
+# 3엔진 선택 → 5필드 (예산3 + 비중 + 최대종목, Discord 최대)
+
+# ✅ VIP 토글 View에서 다음 버튼 클릭 시 선택 없으면 에러 (stop 없이)
+if not self._selected:
+    await interaction.response.send_message(
+        "⚠️ 최소 1개 이상 엔진을 선택해 주세요.", ephemeral=True
+    )
+    return
+
+# ✅ PRO View에서 버튼 클릭 시 Modal 표시 (defer 없이 바로 send_modal)
+async def _on_swing(self, interaction: discord.Interaction) -> None:
+    modal = SwingSettingsModal(...)
+    await interaction.response.send_modal(modal)
+
+# ✅ VIP 토글 버튼 상태 갱신 (edit_message 사용)
+async def _toggle_swing(self, interaction: discord.Interaction) -> None:
+    self._selected.add("SWING") or self._selected.discard("SWING")
+    self._refresh_styles()
+    await interaction.response.edit_message(view=self)
+```
+
 ### Admin 분석용 TradeHistory 태깅 패턴 (2026-03-28 확립)
 
 ```python
@@ -294,6 +340,77 @@ swing_analysis = await self.ai_service.analyze_market(
 if regime.upper() == "BEAR" and not is_major:
     _bear_instruction = "..."
     system_prompt = system_prompt + _bear_instruction
+```
+
+### Admin API 동적 필터 패턴 (2026-03-30 확립)
+
+```python
+# ✅ FastAPI Query 파라미터 + 동적 WHERE 조건 조합
+from fastapi import Query
+from typing import Optional
+from datetime import date, datetime, timezone
+
+@router.get("/trade-logs", dependencies=[Depends(get_api_key)])
+async def get_trade_logs(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
+    user_id: Optional[str] = Query(default=None),
+    is_paper: Optional[bool] = Query(default=None),
+    engine: Optional[str] = Query(default=None),
+    from_date: Optional[date] = Query(default=None),
+    to_date: Optional[date] = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    # ✅ 동적 조건 목록 누적 패턴
+    conditions = []
+    if user_id is not None:
+        conditions.append(TradeHistory.user_id == user_id)
+    if is_paper is not None:
+        conditions.append(TradeHistory.is_paper_trading.is_(is_paper))
+    if engine is not None:
+        conditions.append(TradeHistory.trade_style == engine)
+    if from_date is not None:
+        from_dt = datetime(from_date.year, from_date.month, from_date.day, tzinfo=timezone.utc)
+        conditions.append(TradeHistory.created_at >= from_dt)
+
+    # ✅ 조건이 있을 때만 .where(*conditions) 적용 (빈 리스트 전달 방지)
+    query = select(TradeHistory).order_by(TradeHistory.created_at.desc())
+    if conditions:
+        query = query.where(*conditions)
+
+    # ✅ COUNT 서브쿼리 (페이징 메타 산출)
+    count_query = select(func.count(TradeHistory.id))
+    if conditions:
+        count_query = count_query.where(*conditions)
+    total_count = int((await db.execute(count_query)).scalar() or 0)
+
+    # ✅ LIMIT/OFFSET 페이징
+    offset = (page - 1) * page_size
+    query = query.limit(page_size).offset(offset)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+
+# ✅ Numeric/Decimal → float() 명시적 변환 (buy_amount_krw 등 Numeric 컬럼)
+aum_krw = float(aum_result.scalar() or 0.0)
+
+# ✅ 날짜별 집계 — func.date() 그룹핑 + Python 레벨 빈 날짜 채우기
+daily_result = await db.execute(
+    select(
+        func.date(TradeHistory.created_at).label("trade_date"),
+        func.sum(TradeHistory.profit_krw).label("pnl_krw"),
+    )
+    .where(...)
+    .group_by(func.date(TradeHistory.created_at))
+)
+db_daily_map = {str(row.trade_date): float(row.pnl_krw or 0.0) for row in daily_result.all()}
+# 데이터 없는 날 0.0으로 채우기
+for offset in range(6, -1, -1):
+    date_str = (today_utc - timedelta(days=offset)).strftime("%Y-%m-%d")
+    daily_pnl.append({"date": date_str, "pnl_krw": db_daily_map.get(date_str, 0.0)})
+
+# ✅ 평균 보유시간 — EXTRACT(EPOCH ...) PostgreSQL 문법
+func.avg(
+    func.extract("epoch", TradeHistory.created_at - TradeHistory.bought_at) / 3600
+).label("avg_hold_hours")
 ```
 
 ### 마이그레이션 스크립트 패턴 (scripts/)

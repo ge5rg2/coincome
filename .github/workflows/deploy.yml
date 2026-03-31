@@ -45,6 +45,12 @@ jobs:
             docker-compose run --rm app python -m scripts.add_admin_analytics_columns
 
             # ---------------------------------------------------
+            # 등급별 엔진 수 제한 컬럼 추가 (idempotent)
+            #   - users: max_active_engines (FREE=0, PRO=1, VIP=3)
+            # ---------------------------------------------------
+            docker-compose run --rm app python -m scripts.add_engine_tier_columns
+
+            # ---------------------------------------------------
 
             # 3. DB 세팅이 모두 끝났으니, 안전하게 새 봇을 실행!
             docker-compose up -d app

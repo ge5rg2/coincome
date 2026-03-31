@@ -92,6 +92,7 @@ scope: ai / engine / report / prompt / review / worker / bot / db / docs / marke
 7. **Dynamic Regime Filter**: SWING/SCALPING analyze_market 호출 전 `_fetch_btc_regime()`으로 BTC 4h EMA50 regime 계산 필수. MAJOR 엔진은 적용 제외.
 8. **정기 리포트 View 미첨부**: ai_manager _process_user Step 4 DM 전송 시 ManualSellView 부착 금지. 수동 청산은 /내포지션 전용.
 9. **Admin API 인증**: /api/admin/* 엔드포인트는 X-Admin-API-Key 헤더 인증 필수. settings.admin_api_key 기반.
+10. **등급별 AI 엔진 제한**: `max_active_engines` 컬럼 (FREE=0/PRO=1/VIP=3). `/ai실전`·`/ai모의` 진입 시 `getattr(user, 'max_active_engines', 1)==0` 이면 즉시 차단. PRO=버튼 1개 택 1 View, VIP=토글 복수 선택 View + 동적 Modal.
 
 ### AI 트레이딩 변경 시 문서 갱신 대상
 - `PROJECT_STATE.md` — 변경 이력, DB 모델, 오픈 이슈
