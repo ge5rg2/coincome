@@ -413,6 +413,67 @@ func.avg(
 ).label("avg_hold_hours")
 ```
 
+### Admin API 집계 쿼리 패턴 (2026-03-31 확립)
+
+```python
+# ✅ 조건부 집계 — case() + func.sum() (N+1 없이 단일 쿼리)
+from sqlalchemy import case
+
+win_count_expr = func.sum(
+    case((TradeHistory.profit_pct > 0, 1), else_=0)
+).label("win_count")
+
+# ✅ AUM 집계 — User 테이블 엔진 모드별 case() 예산 합산
+swing_budget_expr = case(
+    (User.ai_engine_mode.in_(["SWING", "BOTH", "ALL"]), User.ai_swing_budget_krw),
+    else_=0,
+)
+scalp_budget_expr = case(
+    (User.ai_engine_mode.in_(["SCALPING", "BOTH", "ALL"]), User.ai_scalp_budget_krw),
+    else_=0,
+)
+major_budget_expr = case(
+    (User.is_major_enabled.is_(True), User.major_budget),
+    else_=0,
+)
+# 복합 표현식 합산 시 func.sum(expr1 + expr2 + expr3)
+aum_real_result = await db.execute(
+    select(func.sum(swing_budget_expr + scalp_budget_expr + major_budget_expr))
+    .where(User.is_active.is_(True), User.ai_mode_enabled.is_(True))
+)
+
+# ✅ 사용자 목록 N+1 방지 — outerjoin + GROUP BY 집계 단일 쿼리
+stats_query = (
+    select(
+        User.user_id,
+        User.subscription_tier,
+        # ... 나머지 User 컬럼
+        func.count(TradeHistory.id).label("total_trades"),
+        func.sum(TradeHistory.profit_krw).label("total_profit_krw"),
+        win_count_expr,
+    )
+    .outerjoin(TradeHistory, TradeHistory.user_id == User.user_id)
+    .group_by(User.user_id, User.subscription_tier, ...)  # SELECT의 모든 비집계 컬럼
+    .order_by(func.sum(TradeHistory.profit_krw).desc().nulls_last())
+)
+
+# ✅ 배치 서브쿼리 — 조회된 user_id 목록에 대해 오픈 포지션 한 번에 집계
+user_ids = [row.user_id for row in user_rows]
+open_pos_map: dict[str, int] = {}
+if user_ids:
+    open_pos_result = await db.execute(
+        select(BotSetting.user_id, func.count(BotSetting.id).label("open_count"))
+        .where(BotSetting.user_id.in_(user_ids), BotSetting.is_running.is_(True), ...)
+        .group_by(BotSetting.user_id)
+    )
+    open_pos_map = {row.user_id: int(row.open_count or 0) for row in open_pos_result.all()}
+
+# ✅ 직렬화 헬퍼 함수 분리 — 여러 엔드포인트에서 동일 필드 구조 사용 시
+def _serialize_trades(rows: list) -> list[dict]:
+    """TradeHistory ORM 행 목록을 dict 목록으로 변환한다."""
+    return [{"id": row.id, "user_id": row.user_id, ...} for row in rows]
+```
+
 ### 마이그레이션 스크립트 패턴 (scripts/)
 
 ```python
