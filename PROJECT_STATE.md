@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-04-01 (최종 수정: 2026-04-01 — 모의투자 매수금액 폭발 버그 및 AI available_krw 오산 수정)
+> **기준일**: 2026-04-01 (최종 수정: 2026-04-01 — 실전/모의 예산 컬럼 격리 아키텍처 결함 수정)
 > **현재 작업 브랜치**: `dev`
 > **최신 안정 브랜치**: `main` (커밋 `d11a0fd`)
 
@@ -311,6 +311,7 @@ coincome/
 
 | 커밋        | 날짜       | 내용                                                                                                                                                                                                                                                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `9034327`   | 2026-04-01 | feat(engine): 실전/모의 예산 컬럼 격리 — User 모델에 모의 전용 컬럼 4개(ai_paper_engine_mode/ai_paper_swing_budget_krw/ai_paper_scalp_budget_krw/ai_paper_major_budget) 추가, paper_trading.py 모든 modal 저장·읽기 수정, ai_manager.py paper_engine_mode/paper_run_swing/paper_run_scalp 분리, idempotent 마이그레이션 스크립트 add_paper_budget_columns.py 신규 작성 |
 | `be404a3`   | 2026-04-01 | fix(engine): 모의투자 매수금액 폭발 버그 및 AI available_krw 오산 수정 — SWING/SCALPING/MAJOR 모의 예산 계산 시 paper_running 투자 금액 차감 후 swing/scalp_budget cap 적용(버그1), major_budget==0이면 virtual_krw 전체 사용 금지(버그1-C), analyze_market available_krw를 max() 대신 실전 우선 조건식으로 교체(버그3) |
 | `93f9598`   | 2026-03-31 | feat(api): Admin API AUM/PnL 버그 수정 및 users 엔드포인트 신규 추가 — aum_krw를 User 엔진 예산 합산 기준으로 변경, 실전/모의 PnL 분리 집계, GET /api/admin/users(TradeHistory JOIN 집계), GET /api/admin/users/{user_id}/stats(엔진별·청산사유별 분류) 신설 |
 | `931c25a`   | 2026-03-31 | fix(report): AI 운용 총자산 AUM 오류 및 비활성 엔진 레이블 노출 수정 — /ai통계 real_total_asset을 업비트 전체 잔고 대신 AI 예산 합산(swing+scalp+major) 기준으로 표시, _build_unified_report_embed에 is_major_on 파라미터 추가해 MAJOR OFF 시 "2엔진" 레이블·MAJOR 대기 안내 미표시 |
