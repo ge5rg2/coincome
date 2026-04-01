@@ -199,17 +199,52 @@ async def _handle_sell(self, interaction: discord.Interaction) -> None:
     # ... 청산 실행
 ```
 
-### 실전/모의 플래그 격리 (절대 원칙)
+### 실전/모의 플래그 및 예산 컬럼 격리 (절대 원칙)
 
 ```python
 # ✅ Paper 모달에서 허용
 user.ai_paper_mode_enabled = True
-user.ai_engine_mode = "MAJOR"
+user.ai_paper_engine_mode = "MAJOR"       # paper 전용 컬럼
+user.ai_paper_swing_budget_krw = budget   # paper 전용 컬럼
+user.ai_paper_scalp_budget_krw = budget   # paper 전용 컬럼
+user.ai_paper_major_budget = budget       # paper 전용 컬럼
 user.virtual_krw = amount
 
-# ❌ Paper 모달에서 금지 — 실전 플래그 건드리기
-user.is_major_enabled = True   # 절대 금지
-user.ai_mode_enabled = True    # 절대 금지
+# ❌ Paper 모달에서 금지 — 실전 플래그·실전 예산 건드리기
+user.is_major_enabled = True       # 절대 금지
+user.ai_mode_enabled = True        # 절대 금지
+user.ai_engine_mode = "MAJOR"      # 절대 금지 (실전 컬럼)
+user.ai_swing_budget_krw = budget  # 절대 금지 (실전 컬럼)
+user.ai_scalp_budget_krw = budget  # 절대 금지 (실전 컬럼)
+user.major_budget = budget         # 절대 금지 (실전 컬럼)
+```
+
+```python
+# ✅ ai_manager.py: 모의 예산은 paper 전용 변수에서 읽기
+paper_swing_budget = float(getattr(user, "ai_paper_swing_budget_krw", 1_000_000))
+paper_scalp_budget = float(getattr(user, "ai_paper_scalp_budget_krw", 1_000_000))
+paper_major_budget = float(getattr(user, "ai_paper_major_budget", 0))
+
+# 실전 예산
+swing_budget = float(getattr(user, "ai_swing_budget_krw", 1_000_000))
+scalp_budget = float(getattr(user, "ai_scalp_budget_krw", 1_000_000))
+
+# 모의 paper_remaining 계산 시 paper_swing_budget 사용 (실전 swing_budget 혼용 금지)
+swing_paper_remaining = max(0.0, paper_swing_budget - swing_paper_invested)
+```
+
+```python
+# ✅ ai_manager.py: 모의 엔진 모드는 paper_engine_mode에서 읽기
+paper_engine_mode = (getattr(user, "ai_paper_engine_mode", "SWING") or "SWING").upper()
+if paper_engine_mode == "BOTH":
+    paper_engine_mode = "ALL"
+paper_run_swing = paper_engine_mode in ("SWING", "ALL") and is_swing_hour
+paper_run_scalp = paper_engine_mode in ("SCALPING", "ALL")
+
+# 실전 engine_mode와 완전 분리 (engine_mode는 실전 전용)
+engine_mode = (getattr(user, "ai_engine_mode", "SWING") or "SWING").upper()
+run_swing = engine_mode in ("SWING", "ALL") and is_swing_hour
+run_scalp = engine_mode in ("SCALPING", "ALL")
 ```
 
 ### 등급별 AI 엔진 제한 패턴 (2026-03-30 확립)

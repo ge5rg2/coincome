@@ -84,6 +84,7 @@ scope: ai / engine / report / prompt / review / worker / bot / db / docs / marke
 
 ### V2 아키텍처 불변 원칙
 1. **실전/모의 플래그 격리**: Paper 모달은 `is_major_enabled`, `ai_mode_enabled` 절대 수정 금지
+1-B. **실전/모의 예산 컬럼 격리**: Paper 모달은 `ai_paper_engine_mode`, `ai_paper_swing_budget_krw`, `ai_paper_scalp_budget_krw`, `ai_paper_major_budget` 전용 컬럼만 쓰기. `ai_engine_mode`, `ai_swing_budget_krw`, `ai_scalp_budget_krw`, `major_budget` 실전 컬럼 수정 절대 금지
 2. **Ghost Update 방지**: AI 리뷰 후 `_surviving_ids` IN 쿼리 재검증 항상 유지
 3. **on-demand fetch**: 포지션 리뷰 시 캐시 미스 심볼 자동 fetch 유지
 4. **에러 DM 알림**: 크리티컬 오류(force_sell 실패, DB 삽입 실패, 잔고 조회 실패)는 반드시 유저 DM
