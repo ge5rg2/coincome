@@ -1,6 +1,6 @@
 # CoinCome — 프로젝트 현황 (PROJECT STATE)
 
-> **기준일**: 2026-03-30 (최종 수정: 2026-03-30 — PRO/VIP 등급별 AI 트레이딩 UI 및 엔진 차등화 개편 — FREE 차단, PRO 알트 1개, VIP 토글 복수 선택 + max_active_engines 컬럼 추가)
+> **기준일**: 2026-03-31 (최종 수정: 2026-03-31 — Admin API AUM/PnL 버그 수정 및 /users, /users/{user_id}/stats 엔드포인트 신규 추가)
 > **현재 작업 브랜치**: `dev`
 > **최신 안정 브랜치**: `main` (커밋 `d11a0fd`)
 
@@ -311,6 +311,7 @@ coincome/
 
 | 커밋        | 날짜       | 내용                                                                                                                                                                                                                                                                     |
 | ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `93f9598`   | 2026-03-31 | feat(api): Admin API AUM/PnL 버그 수정 및 users 엔드포인트 신규 추가 — aum_krw를 User 엔진 예산 합산 기준으로 변경, 실전/모의 PnL 분리 집계, GET /api/admin/users(TradeHistory JOIN 집계), GET /api/admin/users/{user_id}/stats(엔진별·청산사유별 분류) 신설 |
 | `931c25a`   | 2026-03-31 | fix(report): AI 운용 총자산 AUM 오류 및 비활성 엔진 레이블 노출 수정 — /ai통계 real_total_asset을 업비트 전체 잔고 대신 AI 예산 합산(swing+scalp+major) 기준으로 표시, _build_unified_report_embed에 is_major_on 파라미터 추가해 MAJOR OFF 시 "2엔진" 레이블·MAJOR 대기 안내 미표시 |
 | `034f598`   | 2026-03-30 | feat(api): Admin API P1+P2 — overview·trade-logs 신규, engines·close-types·slippage 고도화 — KPI·7일 pnl·페이징 필터·avg_profit/loss_pct·avg_hold_hours·is_paper/engine 동적 필터 |
 | `cae59b7`   | 2026-03-29 | feat(api): Admin 대시보드 연동 통계 API 라우터 신설 — /api/admin/stats/engines·close-types·slippage, X-Admin-API-Key 인증, ADMIN_API_KEY 환경변수 추가 |

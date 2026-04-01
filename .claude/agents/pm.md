@@ -47,7 +47,7 @@ app/
 ├── api/routers/
 │   ├── payments.py              ← TossPayments 콜백·승인
 │   ├── web.py                   ← 웹 대시보드
-│   └── admin.py                 ← Admin Dashboard 통계 API (X-Admin-API-Key 인증)
+│   └── admin.py                 ← Admin Dashboard 통계 API (X-Admin-API-Key 인증) — overview·trade-logs·stats/engines·stats/close-types·slippage·users·users/{id}/stats
 ├── models/
 │   ├── user.py                  ← User, SubscriptionTier, 엔진 플래그
 │   ├── bot_setting.py           ← BotSetting (포지션 상태 영속 + Admin 분석용 bought_at/ai_version)

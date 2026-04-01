@@ -5,6 +5,13 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 
 ---
 
+## 2026-03-31 — feat(api): Admin API AUM/PnL 버그 수정 및 users 엔드포인트 신규 추가
+- 갱신 파일: pm.md, coder.md, tester.md
+- 갱신 내용:
+  - coder.md에 "Admin API 집계 쿼리 패턴" 섹션 신설 (case() 조건부 집계, outerjoin GROUP BY N+1 방지, 배치 서브쿼리 open_positions 매핑, _serialize_trades 헬퍼 분리 패턴)
+  - tester.md 4단계 회귀 체크에 "Admin API 집계 쿼리 패턴" 검증 항목 추가 (AUM 집계 기준 변경 확인, 실전/모의 PnL 분리, 신규 엔드포인트 N+1 방지, 404 처리)
+  - pm.md 핵심 파일 지도 admin.py 설명에 users·users/{id}/stats 엔드포인트 추가
+
 ## 2026-03-30 — feat(bot): PRO/VIP 등급별 AI 트레이딩 UI 및 엔진 차등화 개편
 - 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md
 - 갱신 내용:
@@ -70,3 +77,9 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 ## 2026-03-25 — 에이전트 오케스트레이션 초기 세팅
 - 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md (신규 생성)
 - 갱신 내용: PM·Coder·Tester 3단계 에이전트 정의, STEP 5 자기 갱신 워크플로 추가
+
+## 2026-03-31 — fix(report): AI 운용 총자산 AUM 오류 및 비활성 엔진 레이블 노출 수정
+- 갱신 파일: 없음 (변경 없음)
+- 갱신 내용: 기존 원칙(실전/모의 플래그 격리, is_major_on 기반 엔진 레이블 분기)의 버그픽스. 신규 아키텍처 원칙 없음.
+  버그 1: /ai통계 real_total_asset = AI 예산 합산 + 코인 평가액 (업비트 전체 잔고 아님)
+  버그 2: _build_unified_report_embed에 is_major_on 파라미터 추가 — MAJOR OFF 시 "2엔진" 레이블·MAJOR 대기 안내 미표시
