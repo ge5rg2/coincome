@@ -261,15 +261,31 @@ class AIFundManagerTask(commands.Cog):
         if engine_mode not in ("SWING", "SCALPING", "MAJOR", "ALL"):
             engine_mode = "SWING"
 
-        # 현재 사이클에서 가동할 엔진 결정
+        # 현재 사이클에서 가동할 엔진 결정 (실전 기준)
         run_swing = engine_mode in ("SWING", "ALL") and is_swing_hour
         run_scalp = engine_mode in ("SCALPING", "ALL")
 
-        # 엔진별 예산·비중 (V2 필드, 기본값으로 폴백)
+        # 모의투자 전용 엔진 모드 (실전 engine_mode와 완전 분리)
+        paper_engine_mode = (getattr(user, "ai_paper_engine_mode", "SWING") or "SWING").upper()
+        if paper_engine_mode == "BOTH":
+            paper_engine_mode = "ALL"
+        if paper_engine_mode not in ("SWING", "SCALPING", "MAJOR", "ALL"):
+            paper_engine_mode = "SWING"
+
+        # 모의 사이클에서 가동할 엔진 결정 (paper 전용 모드 기준)
+        paper_run_swing = paper_engine_mode in ("SWING", "ALL") and is_swing_hour
+        paper_run_scalp = paper_engine_mode in ("SCALPING", "ALL")
+
+        # 엔진별 예산·비중 (실전 전용 V2 필드, 기본값으로 폴백)
         swing_budget = float(getattr(user, "ai_swing_budget_krw", 1_000_000))
         swing_weight = float(getattr(user, "ai_swing_weight_pct", 20))
         scalp_budget = float(getattr(user, "ai_scalp_budget_krw", 1_000_000))
         scalp_weight = float(getattr(user, "ai_scalp_weight_pct", 20))
+
+        # 모의투자 전용 예산 (paper 컬럼에서 독립 읽기)
+        paper_swing_budget = float(getattr(user, "ai_paper_swing_budget_krw", 1_000_000))
+        paper_scalp_budget = float(getattr(user, "ai_paper_scalp_budget_krw", 1_000_000))
+        paper_major_budget = float(getattr(user, "ai_paper_major_budget", 0))
 
         ws_manager = UpbitWebsocketManager.get()
         registry   = WorkerRegistry.get()
@@ -367,8 +383,8 @@ class AIFundManagerTask(commands.Cog):
             _shutting_major_on_real = bool(getattr(user, "is_major_enabled", False))
             _shutting_major_on_paper = (
                 is_paper_active
-                and engine_mode in ("MAJOR", "ALL")
-                and float(getattr(user, "major_budget", 0) or 0) > 0
+                and paper_engine_mode in ("MAJOR", "ALL")
+                and float(getattr(user, "ai_paper_major_budget", 0) or 0) > 0
             )
             embed = self._build_unified_report_embed(
                 market_summary=(
@@ -464,11 +480,11 @@ class AIFundManagerTask(commands.Cog):
         # SWING / SCALPING 엔진 중 하나라도 실행될 때 한 번만 계산한다.
         # 실패 시 기본값 BULL 으로 폴백 — 기존 프롬프트 동작 유지.
         _btc_regime = "BULL"
-        if run_swing or run_scalp:
+        if run_swing or run_scalp or paper_run_swing or paper_run_scalp:
             _btc_regime = await self._fetch_btc_regime()
 
         # ── Step 3-a: SWING 엔진 분석·매수 ───────────────────────────
-        if run_swing:
+        if run_swing or paper_run_swing:
             swing_invested = sum(
                 float(s.buy_amount_krw) for s in real_running
                 if (s.trade_style or "").upper() in ("SWING", "SNIPER")
@@ -479,14 +495,17 @@ class AIFundManagerTask(commands.Cog):
                 float(s.buy_amount_krw or 0) for s in paper_running
                 if (s.trade_style or "").upper() in ("SWING", "SNIPER")
             )
-            swing_paper_remaining = max(0.0, swing_budget - swing_paper_invested)
+            # 모의 예산은 paper 전용 컬럼(ai_paper_swing_budget_krw) 기준
+            swing_paper_remaining = max(0.0, paper_swing_budget - swing_paper_invested)
             swing_paper_available = min(float(user.virtual_krw), swing_paper_remaining) if is_paper_active else 0.0
 
             logger.info(
-                "AI SWING 예산: user_id=%s budget=%.0f invested=%.0f "
-                "remaining=%.0f krw=%.0f → available=%.0f",
+                "AI SWING 예산: user_id=%s real_budget=%.0f invested=%.0f "
+                "remaining=%.0f krw=%.0f → available=%.0f | "
+                "paper_budget=%.0f paper_invested=%.0f paper_available=%.0f",
                 user_id, swing_budget, swing_invested,
                 swing_remaining, actual_krw, swing_real_available,
+                paper_swing_budget, swing_paper_invested, swing_paper_available,
             )
 
             swing_analysis = await self.ai_service.analyze_market(
@@ -503,7 +522,7 @@ class AIFundManagerTask(commands.Cog):
                 )
             swing_picks: list[dict] = swing_analysis.get("picks", [])
 
-            if is_real_active and not _krw_fetch_failed and real_slots > 0 and swing_picks:
+            if run_swing and is_real_active and not _krw_fetch_failed and real_slots > 0 and swing_picks:
                 await self._buy_new_coins(
                     user=user,
                     picks=swing_picks,
@@ -517,17 +536,17 @@ class AIFundManagerTask(commands.Cog):
                     max_slots=real_slots,
                     engine_type="SWING",
                 )
-            elif is_real_active and _krw_fetch_failed:
+            elif run_swing and is_real_active and _krw_fetch_failed:
                 logger.info("잔고 조회 실패로 실전 SWING 매수 스킵: user_id=%s", user_id)
-            elif is_real_active and real_slots <= 0:
+            elif run_swing and is_real_active and real_slots <= 0:
                 logger.info(
                     "최대 보유 종목 도달로 실전 SWING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                     len(real_running), user.ai_max_coins, user_id,
                 )
-            elif is_real_active:
+            elif run_swing and is_real_active:
                 logger.info("실전 SWING AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-            if is_paper_active and paper_slots > 0 and swing_picks:
+            if paper_run_swing and is_paper_active and paper_slots > 0 and swing_picks:
                 await self._buy_new_coins(
                     user=user,
                     picks=swing_picks,
@@ -541,22 +560,24 @@ class AIFundManagerTask(commands.Cog):
                     max_slots=paper_slots,
                     engine_type="SWING",
                 )
-            elif is_paper_active and paper_slots <= 0:
+            elif paper_run_swing and is_paper_active and paper_slots <= 0:
                 logger.info(
                     "[모의] 최대 보유 종목 도달로 SWING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                     len(paper_running), user.ai_max_coins, user_id,
                 )
-            elif is_paper_active:
+            elif paper_run_swing and is_paper_active:
                 logger.info("모의 SWING AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
             # ALL 모드: 스윙 매수 후 슬롯·보유 집합 업데이트 (스캘핑 중복 방지)
             if engine_mode == "ALL":
                 real_slots  -= sum(1 for b in real_bought  if b.get("engine_type") == "SWING")
+                holding_symbols |= {b["symbol"] for b in real_bought}
+            if paper_engine_mode == "ALL":
                 paper_slots -= sum(1 for b in paper_bought if b.get("engine_type") == "SWING")
-                holding_symbols |= {b["symbol"] for b in real_bought + paper_bought}
+                holding_symbols |= {b["symbol"] for b in paper_bought}
 
         # ── Step 3-b: SCALPING 엔진 분석·매수 ────────────────────────
-        if run_scalp:
+        if run_scalp or paper_run_scalp:
             scalp_invested = sum(
                 float(s.buy_amount_krw) for s in real_running
                 if (s.trade_style or "").upper() in ("SCALPING", "BEAST")
@@ -567,14 +588,17 @@ class AIFundManagerTask(commands.Cog):
                 float(s.buy_amount_krw or 0) for s in paper_running
                 if (s.trade_style or "").upper() in ("SCALPING", "BEAST")
             )
-            scalp_paper_remaining = max(0.0, scalp_budget - scalp_paper_invested)
+            # 모의 예산은 paper 전용 컬럼(ai_paper_scalp_budget_krw) 기준
+            scalp_paper_remaining = max(0.0, paper_scalp_budget - scalp_paper_invested)
             scalp_paper_available = min(float(user.virtual_krw), scalp_paper_remaining) if is_paper_active else 0.0
 
             logger.info(
-                "AI SCALPING 예산: user_id=%s budget=%.0f invested=%.0f "
-                "remaining=%.0f krw=%.0f → available=%.0f",
+                "AI SCALPING 예산: user_id=%s real_budget=%.0f invested=%.0f "
+                "remaining=%.0f krw=%.0f → available=%.0f | "
+                "paper_budget=%.0f paper_invested=%.0f paper_available=%.0f",
                 user_id, scalp_budget, scalp_invested,
                 scalp_remaining, actual_krw, scalp_real_available,
+                paper_scalp_budget, scalp_paper_invested, scalp_paper_available,
             )
 
             scalp_analysis = await self.ai_service.analyze_market(
@@ -591,7 +615,7 @@ class AIFundManagerTask(commands.Cog):
                 )
             scalp_picks: list[dict] = scalp_analysis.get("picks", [])
 
-            if is_real_active and not _krw_fetch_failed and real_slots > 0 and scalp_picks:
+            if run_scalp and is_real_active and not _krw_fetch_failed and real_slots > 0 and scalp_picks:
                 await self._buy_new_coins(
                     user=user,
                     picks=scalp_picks,
@@ -605,17 +629,17 @@ class AIFundManagerTask(commands.Cog):
                     max_slots=real_slots,
                     engine_type="SCALPING",
                 )
-            elif is_real_active and _krw_fetch_failed:
+            elif run_scalp and is_real_active and _krw_fetch_failed:
                 logger.info("잔고 조회 실패로 실전 SCALPING 매수 스킵: user_id=%s", user_id)
-            elif is_real_active and real_slots <= 0:
+            elif run_scalp and is_real_active and real_slots <= 0:
                 logger.info(
                     "최대 보유 종목 도달로 실전 SCALPING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                     len(real_running), user.ai_max_coins, user_id,
                 )
-            elif is_real_active:
+            elif run_scalp and is_real_active:
                 logger.info("실전 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
-            if is_paper_active and paper_slots > 0 and scalp_picks:
+            if paper_run_scalp and is_paper_active and paper_slots > 0 and scalp_picks:
                 await self._buy_new_coins(
                     user=user,
                     picks=scalp_picks,
@@ -629,22 +653,22 @@ class AIFundManagerTask(commands.Cog):
                     max_slots=paper_slots,
                     engine_type="SCALPING",
                 )
-            elif is_paper_active and paper_slots <= 0:
+            elif paper_run_scalp and is_paper_active and paper_slots <= 0:
                 logger.info(
                     "[모의] 최대 보유 종목 도달로 SCALPING 매수 스킵 (보유=%d / 최대=%d): user_id=%s",
                     len(paper_running), user.ai_max_coins, user_id,
                 )
-            elif is_paper_active:
+            elif paper_run_scalp and is_paper_active:
                 logger.info("모의 SCALPING AI 신규 픽 없음 (관망): user_id=%s", user_id)
 
         # ── Step 3-c: MAJOR 트렌드 캐처 엔진 (스윙 시간대 전용) ──────
         # 실전 MAJOR: is_major_enabled=True (오직 /ai실전 MAJOR 모달만 설정, paper 모달은 건드리지 않음)
-        # 모의 MAJOR: ai_paper_mode_enabled + engine_mode in ("MAJOR","ALL") + major_budget > 0
+        # 모의 MAJOR: ai_paper_mode_enabled + paper_engine_mode in ("MAJOR","ALL") + ai_paper_major_budget > 0
         is_major_on_real: bool = bool(getattr(user, "is_major_enabled", False))
         is_major_on_paper: bool = (
             is_paper_active
-            and engine_mode in ("MAJOR", "ALL")
-            and float(getattr(user, "major_budget", 0) or 0) > 0
+            and paper_engine_mode in ("MAJOR", "ALL")
+            and paper_major_budget > 0
         )
         is_major_on: bool = is_major_on_real or is_major_on_paper
 
@@ -661,11 +685,11 @@ class AIFundManagerTask(commands.Cog):
                 await asyncio.sleep(0.3)  # ccxt rate-limit 방어
 
             if major_market_data:
-                # 실전 MAJOR 가용 예산 (is_major_on_real인 경우만)
+                # 실전 MAJOR 가용 예산 (is_major_on_real인 경우만, 실전 major_budget 사용)
                 major_krw_base       = actual_krw if major_budget == 0 else min(actual_krw, major_budget)
                 major_real_available = (major_krw_base * major_ratio / 100) if (is_real_active and is_major_on_real) else 0.0
-                # 모의 MAJOR 가용 예산: 가상 잔고 기준 major_budget 캡
-                major_paper_base     = 0.0 if major_budget == 0 else min(float(user.virtual_krw), major_budget)
+                # 모의 MAJOR 가용 예산: 가상 잔고 기준 paper_major_budget 캡 (paper 전용 컬럼 사용)
+                major_paper_base     = 0.0 if paper_major_budget == 0 else min(float(user.virtual_krw), paper_major_budget)
                 major_paper_available = (major_paper_base * major_ratio / 100) if is_major_on_paper else 0.0
 
                 major_analysis = await self.ai_service.analyze_market(

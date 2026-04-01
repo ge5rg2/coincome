@@ -129,6 +129,15 @@ class User(Base):
     major_budget: Mapped[int] = mapped_column(Integer, default=0)
     major_trade_ratio: Mapped[int] = mapped_column(Integer, default=10)
 
+    # ── AI V2: 모의투자 전용 엔진 설정 ──────────────────────────────────
+    # 실전 엔진 설정과 완전 분리. 모의투자 modal이 여기에만 저장.
+    # ai_engine_mode / ai_swing_budget_krw / ai_scalp_budget_krw / major_budget 는
+    # 실전 전용. 모의투자는 반드시 아래 paper 전용 컬럼만 읽고 씀.
+    ai_paper_engine_mode: Mapped[str] = mapped_column(String(10), default="SWING")
+    ai_paper_swing_budget_krw: Mapped[int] = mapped_column(Integer, default=1_000_000)
+    ai_paper_scalp_budget_krw: Mapped[int] = mapped_column(Integer, default=1_000_000)
+    ai_paper_major_budget: Mapped[int] = mapped_column(Integer, default=0)
+
     payments: Mapped[list["Payment"]] = relationship("Payment", back_populates="user")
     bot_settings: Mapped[list["BotSetting"]] = relationship("BotSetting", back_populates="user")
     trade_histories: Mapped[list["TradeHistory"]] = relationship(
