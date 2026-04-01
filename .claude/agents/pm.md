@@ -58,7 +58,8 @@ app/
     └── time.py                  ← KST 유틸
 scripts/
 │   ├── add_admin_analytics_columns.py ← Admin 분석 컬럼 idempotent 마이그레이션
-│   └── add_engine_tier_columns.py    ← 등급별 max_active_engines 컬럼 idempotent 마이그레이션
+│   ├── add_engine_tier_columns.py    ← 등급별 max_active_engines 컬럼 idempotent 마이그레이션
+│   └── add_paper_budget_columns.py   ← 모의투자 전용 예산 컬럼 4개 idempotent 마이그레이션
 docs/AI_TRADING_ARCHITECTURE.md  ← 아키텍처 문서
 PROJECT_STATE.md                 ← 프로젝트 현황 문서
 ```
@@ -67,6 +68,7 @@ PROJECT_STATE.md                 ← 프로젝트 현황 문서
 - **엔진**: SWING / SCALPING / MAJOR / ALL (구: BOTH)
 - **실전/모의 플래그 격리**: `is_major_enabled`·`ai_mode_enabled`는 실전 전용.
   Paper 모달은 이 두 필드를 절대 건드리지 않음.
+- **실전/모의 예산 컬럼 격리**: 모의투자는 `ai_paper_engine_mode`, `ai_paper_swing_budget_krw`, `ai_paper_scalp_budget_krw`, `ai_paper_major_budget` 전용 컬럼만 읽고 씀. Paper 모달에서 실전 컬럼(`ai_engine_mode`, `ai_swing_budget_krw`, `ai_scalp_budget_krw`, `major_budget`) 수정 절대 금지. ai_manager.py에서도 모의 예산은 paper 전용 변수(`paper_swing_budget`, `paper_scalp_budget`, `paper_major_budget`)에서만 읽음.
 - **Ghost Update 방지**: `review_positions()` 반환 후 `_surviving_ids` IN 쿼리로 재검증
 - **on-demand fetch**: 보유 포지션 심볼이 캐시 미스면 `fetch_and_cache_symbol()` 즉시 호출
 - **에러 DM 알림**: `force_sell` 실패, DB 삽입 실패, 잔고 조회 실패 시 반드시 유저 DM

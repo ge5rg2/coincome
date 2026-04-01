@@ -5,6 +5,21 @@ PM STEP 5에서 매 워크플로 완료 후 기록.
 
 ---
 
+## 2026-04-01 — feat(engine): 실전/모의 예산 컬럼 격리 아키텍처 결함 수정
+- 갱신 파일: pm.md, coder.md, tester.md, CLAUDE.md
+- 갱신 내용:
+  - pm.md V2 원칙에 "실전/모의 예산 컬럼 격리" 원칙 추가 (ai_paper_* 전용 컬럼 쓰기, 실전 컬럼 Paper 모달에서 절대 금지)
+  - pm.md 핵심 파일 지도에 add_paper_budget_columns.py 추가
+  - coder.md 실전/모의 플래그 격리 패턴 섹션을 "실전/모의 플래그 및 예산 컬럼 격리"로 확장 (paper 전용 컬럼 쓰기 예시, ai_manager.py paper_engine_mode/paper_run_swing/paper_run_scalp 분리 패턴 추가)
+  - tester.md 4단계 회귀 체크에 "실전/모의 예산 컬럼 격리" 검증 항목 추가 (ai_paper_* 컬럼 사용, 실전 컬럼 수정 없음, ai_manager.py paper 변수 분리 확인)
+  - CLAUDE.md V2 불변 원칙에 1-B번 (실전/모의 예산 컬럼 격리) 추가
+
+## 2026-04-01 — fix(engine): 모의투자 매수금액 폭발 버그 및 AI available_krw 오산 수정
+- 갱신 파일: tester.md
+- 갱신 내용: 모의 예산 Cap 패턴 회귀 체크 항목 추가 — swing/scalp_paper_invested 합산, budget cap min() 적용, major_budget==0 시 0.0 처리, analyze_market available_krw max() 금지 조건식 검증 포인트 신설
+
+---
+
 ## 2026-03-31 — feat(api): Admin API AUM/PnL 버그 수정 및 users 엔드포인트 신규 추가
 - 갱신 파일: pm.md, coder.md, tester.md
 - 갱신 내용:
