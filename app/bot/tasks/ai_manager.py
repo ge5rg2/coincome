@@ -475,7 +475,12 @@ class AIFundManagerTask(commands.Cog):
             )
             swing_remaining       = max(0.0, swing_budget - swing_invested)
             swing_real_available  = min(actual_krw, swing_remaining) if is_real_active else 0.0
-            swing_paper_available = float(user.virtual_krw) if is_paper_active else 0.0
+            swing_paper_invested  = sum(
+                float(s.buy_amount_krw or 0) for s in paper_running
+                if (s.trade_style or "").upper() in ("SWING", "SNIPER")
+            )
+            swing_paper_remaining = max(0.0, swing_budget - swing_paper_invested)
+            swing_paper_available = min(float(user.virtual_krw), swing_paper_remaining) if is_paper_active else 0.0
 
             logger.info(
                 "AI SWING 예산: user_id=%s budget=%.0f invested=%.0f "
@@ -489,7 +494,7 @@ class AIFundManagerTask(commands.Cog):
                 holding_symbols,
                 engine_type="SWING",
                 weight_pct=swing_weight,
-                available_krw=max(swing_real_available, swing_paper_available),
+                available_krw=swing_real_available if is_real_active else swing_paper_available,
                 regime=_btc_regime,
             )
             if swing_analysis.get("market_summary"):
@@ -558,7 +563,12 @@ class AIFundManagerTask(commands.Cog):
             )
             scalp_remaining       = max(0.0, scalp_budget - scalp_invested)
             scalp_real_available  = min(actual_krw, scalp_remaining) if is_real_active else 0.0
-            scalp_paper_available = float(user.virtual_krw) if is_paper_active else 0.0
+            scalp_paper_invested  = sum(
+                float(s.buy_amount_krw or 0) for s in paper_running
+                if (s.trade_style or "").upper() in ("SCALPING", "BEAST")
+            )
+            scalp_paper_remaining = max(0.0, scalp_budget - scalp_paper_invested)
+            scalp_paper_available = min(float(user.virtual_krw), scalp_paper_remaining) if is_paper_active else 0.0
 
             logger.info(
                 "AI SCALPING 예산: user_id=%s budget=%.0f invested=%.0f "
@@ -572,7 +582,7 @@ class AIFundManagerTask(commands.Cog):
                 holding_symbols,
                 engine_type="SCALPING",
                 weight_pct=scalp_weight,
-                available_krw=max(scalp_real_available, scalp_paper_available),
+                available_krw=scalp_real_available if is_real_active else scalp_paper_available,
                 regime=_btc_regime,
             )
             if scalp_analysis.get("market_summary"):
@@ -655,7 +665,7 @@ class AIFundManagerTask(commands.Cog):
                 major_krw_base       = actual_krw if major_budget == 0 else min(actual_krw, major_budget)
                 major_real_available = (major_krw_base * major_ratio / 100) if (is_real_active and is_major_on_real) else 0.0
                 # 모의 MAJOR 가용 예산: 가상 잔고 기준 major_budget 캡
-                major_paper_base     = float(user.virtual_krw) if major_budget == 0 else min(float(user.virtual_krw), major_budget)
+                major_paper_base     = 0.0 if major_budget == 0 else min(float(user.virtual_krw), major_budget)
                 major_paper_available = (major_paper_base * major_ratio / 100) if is_major_on_paper else 0.0
 
                 major_analysis = await self.ai_service.analyze_market(
@@ -663,7 +673,7 @@ class AIFundManagerTask(commands.Cog):
                     holding_symbols,
                     engine_type="MAJOR_TREND",
                     weight_pct=major_ratio,
-                    available_krw=max(major_real_available, major_paper_available),
+                    available_krw=major_real_available if (is_real_active and is_major_on_real) else major_paper_available,
                 )
                 if major_analysis.get("market_summary"):
                     market_summaries.append(
